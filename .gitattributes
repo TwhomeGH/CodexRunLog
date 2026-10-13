@@ -1,0 +1,6 @@
+# 統一換行：無論平台，repo 與工作區一律使用 LF。
+#
+# Windows 的 `core.autocrlf=true` 會讓 git 在 checkout 時把文字檔改成 CRLF，
+# 於是每次 `git add`/`commit` 都會出現「LF will be replaced by CRLF」警告，
+# 且不同平台／不同工具產生的檔案換行不一致。這裡明確指定 `eol=lf`（優先於 autocrlf）。
+* text=auto eol=lf

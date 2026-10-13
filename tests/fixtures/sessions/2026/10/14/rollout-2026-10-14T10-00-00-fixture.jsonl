@@ -1,0 +1,7 @@
+{"timestamp":"2026-10-14T10:00:00Z","type":"session_meta","payload":{"id":"fixture-new","cwd":"C:\\fixtures\\demo","cli_version":"0.162.0"}}
+{"timestamp":"2026-10-14T10:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"text(await tools.exec_command({cmd:\"git status\",justification:\"檢查狀態\"}));"}}
+{"timestamp":"2026-10-14T10:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"Promise.allSettled([tools.exec_command({cmd:\"echo a\"}),tools.exec_command({cmd:\"echo b\"})])"}}
+{"timestamp":"2026-10-14T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls -la\",\"workdir\":\"C:\\\\proj\"}"}}
+{"timestamp":"2026-10-14T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"rg foo .\"}"}}
+{"timestamp":"2026-10-14T10:00:05Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{}"}}
+{"timestamp":"2026-10-14T10:00:06Z","type":"event_msg","payload":{"type":"message","text":"hi"}}

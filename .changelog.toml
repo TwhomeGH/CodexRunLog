@@ -1,0 +1,7 @@
+[tool.changelog]
+title = "Codex 運行日誌 — 改動說明"
+history = "Docs/ChangeHistory.md"
+
+[[tool.changelog.sources]]
+name = "codexrunlog"
+path = "."

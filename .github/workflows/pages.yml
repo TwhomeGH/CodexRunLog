@@ -1,0 +1,46 @@
+# 以 changelogkit 匯出唯讀靜態站並部署到 GitHub Pages。
+# 需先在 repo Settings → Pages → Source 選「GitHub Actions」。
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0          # 需要完整歷史才能列 commits 與 diff
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - name: Install changelogkit
+        run: python -m pip install "changelogkit>=0.5,<0.6"
+      - name: Export static site
+        run: changelogkit export _site --branch main
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
