@@ -1,0 +1,2 @@
+# CodexRunLog
+改進Codex每次都不把詳細指令內文顯示完整的問題
