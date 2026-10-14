@@ -61,12 +61,17 @@
 
 | 參數 | 型別 | 預設 | 說明 |
 | --- | --- | --- | --- |
-| `-Limit` | int | `50` | 起始顯示筆數（由新到舊） |
-| `-Tail` | switch | 關 | 印完起始內容後，輪詢並即時輸出後續新紀錄 |
+| `-Limit` | int | `50` | 起始顯示筆數；一般模式最新在上，`-Tail` 模式則由舊到新 |
+| `-Tail` | switch | 關 | 印完起始內容後，輪詢並即時輸出後續新紀錄（由舊到新，最新在最底部） |
 | `-Interval` | int | `2` | `-Tail` 的輪詢間隔秒數 |
 | `-SessionsDir` | string | 自動解析 | rollout JSONL 根目錄；省略時依「設定檔 → `%USERPROFILE%\.codex\sessions` → 手動輸入」解析 |
 
 `-Tail` 用 `Ctrl+C` 結束。
+
+監看模式的排序與除重：
+
+- 起始內容**由舊到新**排列（最新在最底部），後續新事件自然往下接續，維持單一時間軸、不會亂序。
+- 以「時間下限」過濾：只有比目前最新事件更新者才輸出，避免新出現的 rollout 檔**重播舊內容**。
 
 ### 設定檔 `CodexRunlog.ini`
 
@@ -120,13 +125,13 @@ sessions = C:\Users\someone\.codex\sessions
 ## 運作原理
 
 1. **掃檔**：列出所有 `rollout-*.jsonl`，依 `LastWriteTime` 由新到舊處理，累積到 `-Limit` 筆就停。
-2. **取指令事件**：只解析含 `exec_command` / `shell_command` 關鍵字的行（先做便宜的字串預篩，省去大量 JSON 解析），還原轉義後取出 `cmd` / `justification` / `sandbox_permissions` / `workdir`。
+2. **取指令事件**：只解析含 `exec_command` / `shell_command` 關鍵字的行（先做便宜的字串預篩，省去大量 JSON 解析），還原轉義後取出 `cmd` / `justification` / `sandbox_permissions` / `workdir`。`cmd` 可能是雙引號、單引號或反引號樣板字串（多行），三種都會解析。
 3. **語言判斷**：
    - here-string（`@'…'@` / `@"…"@`）先看內容是 Python（`import` / `def` / `print(`）還是 JavaScript（`require(` / `=>` / `const`）。
    - 其他依 PowerShell cmdlet / `$var` / `#`、`git`、或預設 shell 判定。
 4. **上色**：單次掃描 tokenizer，**字串/註解優先**匹配，避免關鍵字跑進字串、色碼互相污染。
 5. **展開**：僅 PowerShell 會把 `;` `{` `}` 在**字串外**斷行並 4 空格縮排；`for(;;)` 之類用**括號深度**保護不誤斷。
-6. **監看**：`-Tail` 記錄每個檔的**位元組位移**，輪詢時只讀新增部分，保留未完成的尾行；新 session 檔自動納入。
+6. **監看**：`-Tail` 記錄每個檔的**位元組位移**，輪詢時只讀新增部分，保留未完成的尾行；新 session 檔自動納入。輸出的新事件依時間排序並接續在下方，且以「時間下限」略過比目前最新更舊的內容（避免重播）。
 
 ---
 

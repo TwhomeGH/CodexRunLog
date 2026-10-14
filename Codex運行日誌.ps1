@@ -142,11 +142,20 @@ function ConvertFrom-EscapedString {
 }
 
 # 從 JS 物件 body 取一個字串欄位（cmd / justification / sandbox_permissions / workdir / shell）
+# Codex 依內容選用雙引號、單引號或反引號樣板字串，三種都要支援。
 function Get-JsField {
     param([string]$Body, [string]$Key)
-    $rx = [regex]::new($Key + ':\s*"((?:\\.|[^"\\])*)"')
-    $m = $rx.Match($Body)
-    if ($m.Success) { return (ConvertFrom-EscapedString $m.Groups[1].Value) }
+    $k = [regex]::Escape($Key)
+    $bt = [char]96
+    $patterns = @(
+        ($k + ':\s*"((?:\\.|[^"\\])*)"'),
+        ($k + ":\s*'((?:\\.|[^'\\])*)'"),
+        ($k + ':\s*' + $bt + '((?:\\.|[^' + $bt + '\\])*)' + $bt)
+    )
+    foreach ($p in $patterns) {
+        $m = [regex]::Match($Body, $p)
+        if ($m.Success) { return (ConvertFrom-EscapedString $m.Groups[1].Value) }
+    }
     return ''
 }
 
@@ -160,16 +169,17 @@ function Get-ExecFromJs {
         $b = $Js.IndexOf('{', $idx + $needle.Length - 1)
         if ($b -lt 0) { break }
 
-        # 由 { 起掃到配對的 }，字串內的括號不算
-        $depth = 0; $i = $b; $inStr = $false; $esc = $false; $end = -1
+        # 由 { 起掃到配對的 }；字串（雙引號、單引號、反引號樣板）內的括號不算
+        $bt = [char]96
+        $depth = 0; $i = $b; $inStr = $false; $quote = ''; $esc = $false; $end = -1
         while ($i -lt $Js.Length) {
             $ch = $Js[$i]
             if ($inStr) {
                 if ($esc) { $esc = $false }
                 elseif ($ch -eq '\') { $esc = $true }
-                elseif ($ch -eq '"') { $inStr = $false }
+                elseif ($ch -eq $quote) { $inStr = $false }
             } else {
-                if ($ch -eq '"') { $inStr = $true }
+                if ($ch -eq '"' -or $ch -eq "'" -or $ch -eq $bt) { $inStr = $true; $quote = $ch }
                 elseif ($ch -eq '{') { $depth++ }
                 elseif ($ch -eq '}') { $depth--; if ($depth -eq 0) { $end = $i; break } }
             }
@@ -539,15 +549,44 @@ function Resolve-SessionsDir {
     }
 }
 
+# 回傳事件集合中最大的時間，作為監看模式的「時間下限」。
+function Get-MaxEventTime {
+    param($Events, [DateTimeOffset]$Start = [DateTimeOffset]::MinValue)
+    $max = $Start
+    foreach ($e in $Events) {
+        if ($e.Time -and $e.Time -gt $max) { $max = $e.Time }
+    }
+    return $max
+}
+
+# 只保留比 Floor 新（或時間未知）的事件，避免新的 rollout 檔重播舊內容。
+function Select-NewEvents {
+    param($Events, [DateTimeOffset]$Floor)
+    foreach ($e in $Events) {
+        if ($null -eq $e.Time -or $e.Time -gt $Floor) { $e }
+    }
+}
+
 # 被 dot-source 時（例如單元測試載入函式）不執行主流程
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 $SessionsDir = Resolve-SessionsDir $SessionsDir
 
-foreach ($e in (Get-RecentEvents $Limit)) { Show-Event $e }
+$events = @(Get-RecentEvents $Limit)
 
-if (-not $Tail) { return }
+if (-not $Tail) {
+    # 一般模式：最新在上，方便一眼看到最近的動作
+    foreach ($e in $events) { Show-Event $e }
+    return
+}
 
+# 監看模式：由舊到新排列（最新在最底部），後續新事件自然往下接續，不會亂序
+foreach ($e in ($events | Sort-Object Time)) { Show-Event $e }
+
+# 時間下限：晚於此時間者才算「新事件」，可避免新出現的 rollout 檔重播舊內容
+$floor = Get-MaxEventTime $events
+
+# 記下各檔目前的結尾位移，之後只讀新增位元組，不會重播舊內容
 $offsets = @{}
 $carries = @{}
 foreach ($f in (Get-RolloutFiles)) {
@@ -555,7 +594,7 @@ foreach ($f in (Get-RolloutFiles)) {
     $carries[$f.FullName] = ''
 }
 
-Write-Host (Color '90' "── 監看中（每 $Interval 秒輪詢，Ctrl+C 結束）──")
+Write-Host (Color '90' "── 監看中（每 $Interval 秒輪詢；新事件接續於下方，Ctrl+C 結束）──")
 while ($true) {
     Start-Sleep -Seconds $Interval
 
@@ -580,11 +619,14 @@ while ($true) {
         $cwd = Get-SessionCwd $path
         foreach ($line in $r.Lines) {
             if (-not (Test-HasCommand $line)) { continue }
-            foreach ($ev in (Get-CommandEventsFromLine $line $path $cwd)) { $batch.Add($ev) }
+            $lineEvents = Get-CommandEventsFromLine $line $path $cwd
+            foreach ($ev in (Select-NewEvents $lineEvents $floor)) { $batch.Add($ev) }
         }
     }
 
     if ($batch.Count -gt 0) {
-        foreach ($e in ($batch | Sort-Object Time)) { Show-Event $e }
+        $sorted = @($batch | Sort-Object Time)
+        foreach ($e in $sorted) { Show-Event $e }
+        $floor = Get-MaxEventTime $sorted $floor
     }
 }

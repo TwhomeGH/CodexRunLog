@@ -228,3 +228,89 @@ Describe '整合：fixture 檔端到端解析' {
         $script:fixtureEvents | Should -HaveCount 5
     }
 }
+
+Describe '監看時間下限（Get-MaxEventTime / Select-NewEvents）' {
+    It 'Get-MaxEventTime 取集合中最大時間' {
+        $ev1 = [pscustomobject]@{ Time = [DateTimeOffset]::Parse('2026-10-14T10:00:01Z'); Cmd = 'a' }
+        $ev2 = [pscustomobject]@{ Time = [DateTimeOffset]::Parse('2026-10-14T10:00:02Z'); Cmd = 'b' }
+        Get-MaxEventTime @($ev1, $ev2) | Should -Be ([DateTimeOffset]::Parse('2026-10-14T10:00:02Z'))
+    }
+
+    It 'Get-MaxEventTime 空集合時回傳 Start' {
+        $start = [DateTimeOffset]::Parse('2026-10-01T00:00:00Z')
+        Get-MaxEventTime @() $start | Should -Be $start
+    }
+
+    It 'Select-NewEvents 只保留比 Floor 新的事件' {
+        $t1 = [DateTimeOffset]::Parse('2026-10-14T10:00:01Z')
+        $ev1 = [pscustomobject]@{ Time = $t1; Cmd = 'a' }
+        $ev2 = [pscustomobject]@{ Time = [DateTimeOffset]::Parse('2026-10-14T10:00:02Z'); Cmd = 'b' }
+        $new = @(Select-NewEvents @($ev1, $ev2) $t1)
+        $new | Should -HaveCount 1
+        $new[0].Cmd | Should -Be 'b'
+    }
+
+    It 'Select-NewEvents 保留時間未知（null）的事件' {
+        $evNull = [pscustomobject]@{ Time = $null; Cmd = 'x' }
+        $floor = [DateTimeOffset]::Parse('2026-10-14T10:00:02Z')
+        @(Select-NewEvents @($evNull) $floor)[0].Cmd | Should -Be 'x'
+    }
+}
+
+Describe '單引號 cmd（Codex 另一種寫法）' {
+    It 'Get-JsField 支援單引號字串' {
+        Get-JsField "cmd:'git status'" 'cmd' | Should -Be 'git status'
+    }
+
+    It 'Get-JsField 還原單引號內的反斜線轉義' {
+        Get-JsField "cmd:'rg -n \'foo\' .'" 'cmd' | Should -Be "rg -n 'foo' ."
+    }
+
+    It 'Get-ExecFromJs 抽出單引號 cmd' {
+        $js = "text(await tools.exec_command({cmd:'git status',max_output_tokens:4000}));"
+        $e = @(Get-ExecFromJs $js)
+        $e | Should -HaveCount 1
+        $e[0].Cmd | Should -Be 'git status'
+    }
+
+    It 'Get-ExecFromJs 單引號 cmd 內的大括號不會破壞擷取' {
+        $js = "tools.exec_command({cmd:'echo {a} }',max_output_tokens:10})"
+        $e = @(Get-ExecFromJs $js)
+        $e | Should -HaveCount 1
+        $e[0].Cmd | Should -Be 'echo {a} }'
+    }
+
+    It 'Get-ExecFromJs 混合雙引號與單引號欄位' {
+        $js = "tools.exec_command({cmd:'git diff --check',sandbox_permissions:`"require_escalated`",justification:`"檢查`"})"
+        $e = @(Get-ExecFromJs $js)
+        $e[0].Cmd | Should -Be 'git diff --check'
+        $e[0].Sandbox | Should -Be 'require_escalated'
+        $e[0].Justification | Should -Be '檢查'
+    }
+}
+
+Describe '反引號（樣板字串）cmd' {
+    It 'Get-JsField 支援反引號字串' {
+        $bt = [char]96
+        Get-JsField ('cmd:' + $bt + 'hello world' + $bt) 'cmd' | Should -Be 'hello world'
+    }
+
+    It 'Get-ExecFromJs 抽出跨行反引號 cmd' {
+        $js = @'
+tools.exec_command({cmd:`line1
+line2`,max_output_tokens:10})
+'@
+        $e = @(Get-ExecFromJs $js)
+        $e | Should -HaveCount 1
+        $e[0].Cmd | Should -Be "line1`nline2"
+    }
+
+    It '跨行反引號 cmd 內的括號不影響擷取' {
+        $js = @'
+tools.exec_command({cmd:`if (x) { y }
+done`,max_output_tokens:1})
+'@
+        $e = @(Get-ExecFromJs $js)
+        $e[0].Cmd | Should -Be "if (x) { y }`ndone"
+    }
+}

@@ -40,8 +40,8 @@ $cfg.Run.Path = Join-Path $root 'tests'
 $cfg.Run.Exit = $false
 $cfg.Output.Verbosity = 'Detailed'
 $result = Invoke-Pester -Configuration $cfg
-if ($result.FailedCount -gt 0) {
-    Write-Host "Pester: $($result.FailedCount) 個失敗" -ForegroundColor Red
+if ($result.FailedCount -gt 0 -or $result.TotalCount -eq 0) {
+    Write-Host "Pester: $($result.FailedCount) 失敗 / $($result.TotalCount) 總計" -ForegroundColor Red
     $fail++
 }
 
