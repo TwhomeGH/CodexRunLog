@@ -1,5 +1,28 @@
 # Codex 運行日誌 — 改動說明
 
+## 2026.10.30 21:44 補齊 Get-Help 註解說明並加上防漂移測試
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`、`tests/CodexRunlog.Tests.ps1`
+
+### 問題 - Get-Help 只有語法摘要，說明形同失效
+
+`Get-Help .\CodexRunLog.ps1 -Full` 只吐出參數語法，`.SYNOPSIS` / `.DESCRIPTION` / `.PARAMETER` / `.EXAMPLE` 全部沒有顯示；文件只能靠 Markdown 手動維護，容易與程式脫節。
+
+### 根因 - `#requires` 擋在說明區塊前面
+
+腳本的註解說明必須位於檔案**最開頭**（前面只能有註解與空行）；原本第 1 行是 `#requires`，導致整段說明不被辨識。且 `#Requires` 緊接在 `#>` 之後時，會被 Get-Help 當成說明的一部分（範例尾端多出 `Requires -Version 7.0`）。
+
+### 修改 - 說明回到最前面，並以 Get-Help 為單一來源
+
+- 把 `#Requires -Version 7.0` 移到 `param` 區塊之後，說明區塊回到檔案最開頭；`Get-Help -Full` 現在可讀到 Synopsis、Description、4 個參數、4 個具名範例與 2 個 `.LINK`。
+- 補上引號樣式說明、Windows-only 註記、`-Tail` 排序行為、`.NOTES`（文件交叉連結）與 GitHub `.LINK`。
+- 新增 Pester 測試「Get-Help 與文件一致性」：驗證段落齊全，且每個參數都出現在 `README.md` 與 `Docs/CodexRunLog.md`，參數改名時測試會失敗，避免文檔漂移。
+- `PSScriptAnalyzerSettings.psd1` 排除 `PSUseDeclaredVarsMoreThanAssignments`（Pester `BeforeAll` 變數的已知誤報，附理由）。
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
 ## 2026.10.30 21:38 更名為 CodexRunLog（腳本與文件）
 
 **類型**: 變更 · **檔案**: `CodexRunLog.ps1`、`Docs/CodexRunLog.md`

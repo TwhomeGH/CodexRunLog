@@ -66,6 +66,8 @@
 | `-Interval` | int | `2` | `-Tail` 的輪詢間隔秒數 |
 | `-SessionsDir` | string | 自動解析 | rollout JSONL 根目錄；省略時依「設定檔 → `%USERPROFILE%\.codex\sessions` → 手動輸入」解析 |
 
+> 本表為速查。參數與用法的**權威來源是程式內的註解說明**，執行 `Get-Help .\CodexRunLog.ps1 -Full`（另有 `-Examples`、`-Online`）即可取得；修改參數時請一併更新註解。
+
 `-Tail` 用 `Ctrl+C` 結束。
 
 監看模式的排序與除重：

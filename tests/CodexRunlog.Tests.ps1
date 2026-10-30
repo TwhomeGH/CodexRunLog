@@ -314,3 +314,26 @@ done`,max_output_tokens:1})
         $e[0].Cmd | Should -Be "if (x) { y }`ndone"
     }
 }
+
+Describe 'Get-Help 與文件一致性（防文檔漂移）' {
+    BeforeAll {
+        $root = Split-Path -Parent $PSScriptRoot
+        $help = Get-Help (Join-Path $root 'CodexRunLog.ps1') -Full
+    }
+
+    It 'Get-Help 具備完整段落（Synopsis／Description／參數／範例）' {
+        [bool]$help.Synopsis | Should -BeTrue
+        $help.Description.Count | Should -BeGreaterThan 0
+        $help.Parameters.Parameter.Count | Should -Be 4
+        $help.Examples.Example.Count | Should -BeGreaterOrEqual 3
+    }
+
+    It '每個參數都出現在 README 與 Docs 的參數表' {
+        $readme = Get-Content (Join-Path $root 'README.md') -Raw
+        $docs = Get-Content (Join-Path $root 'Docs/CodexRunLog.md') -Raw
+        foreach ($p in $help.Parameters.Parameter.Name) {
+            $readme | Should -Match ([regex]::Escape('-' + $p))
+            $docs | Should -Match ([regex]::Escape('-' + $p))
+        }
+    }
+}

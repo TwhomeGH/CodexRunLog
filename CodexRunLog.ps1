@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
     讀取 Codex 的 rollout JSONL（sessions 目錄），抽出每一次 exec_command
@@ -12,13 +11,17 @@
               payload.input 內含 tools.exec_command({cmd:"…",justification:"…"})
       - 舊版：payload.type=function_call, payload.name=exec_command / shell_command,
               payload.arguments 為 JSON（cmd / command / workdir / shell）
+    cmd 可能以雙引號、單引號或反引號樣板字串（可跨行）包住，皆會解析。
     相較 SQLite 的 feedback_log_body（會被 Codex 截斷），rollout 是完整指令。
+
+    注意：本工具目前僅支援 Windows + PowerShell 7。
 
 .PARAMETER Limit
     起始顯示的指令筆數（由新到舊）。預設 50。
 
 .PARAMETER Tail
     持續監看：印完起始內容後，輪詢各 rollout 檔新增的行並即時輸出。
+    監看模式由舊到新排列（最新在最下方），並略過重播的舊內容。
 
 .PARAMETER Interval
     -Tail 的輪詢間隔秒數。預設 2。
@@ -29,9 +32,30 @@
     若都找不到，會提示手動輸入，並把結果寫回 CodexRunlog.ini。
 
 .EXAMPLE
-    .\CodexRunLog.ps1
-    .\CodexRunLog.ps1 -Limit 100
-    .\CodexRunLog.ps1 -Tail -Interval 3
+    顯示最新 50 筆指令。
+    PS C:\> .\CodexRunLog.ps1
+
+.EXAMPLE
+    顯示最新 100 筆。
+    PS C:\> .\CodexRunLog.ps1 -Limit 100
+
+.EXAMPLE
+    持續監看，每 3 秒輪詢一次（Ctrl+C 結束）。
+    PS C:\> .\CodexRunLog.ps1 -Tail -Interval 3
+
+.EXAMPLE
+    指定 rollout 根目錄。
+    PS C:\> .\CodexRunLog.ps1 -SessionsDir 'D:\codex\sessions'
+
+.NOTES
+    相關文件：Docs/CodexRunLog.md（完整說明）、Docs/ChangeHistory.md（更新歷史）、TODO.md（待辦）。
+    參數與用法以 Get-Help .\CodexRunLog.ps1 -Full 為準。
+
+.LINK
+    https://github.com/TwhomeGH/CodexRunLog
+
+.LINK
+    https://github.com/TwhomeGH/CodexRunLog/blob/main/Docs/CodexRunLog.md
 #>
 [CmdletBinding()]
 param(
@@ -40,6 +64,7 @@ param(
     [int]$Interval = 2,
     [string]$SessionsDir = ''
 )
+#Requires -Version 7.0
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8

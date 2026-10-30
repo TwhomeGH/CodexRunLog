@@ -55,6 +55,8 @@ Codex 在對話中常只顯示指令的摘要或截斷片段，長指令（例�
 | `-Interval` | `2` | `-Tail` 的輪詢間隔秒數 |
 | `-SessionsDir` | 自動解析 | rollout JSONL 根目錄 |
 
+> 上表僅為速查。參數與用法的權威來源是程式內的註解說明（單一來源），可直接執行 `Get-Help .\CodexRunLog.ps1 -Full`（另有 `-Examples`、`-Online`）。修改參數時請一併更新註解說明。
+
 ## 資料來源
 
 讀取 `sessions/<年>/<月>/<日>/rollout-*.jsonl` 中 **top-level `type=response_item`** 的行：
