@@ -2,13 +2,13 @@
 
 本檔記錄**尚未正式開始 / 規劃中**的工作。已完成項目請看 [`Docs/ChangeHistory.md`](Docs/ChangeHistory.md)。
 
-現況：目前只有 **Windows + PowerShell 7** 的實作（`Codex運行日誌.ps1`），尚未考慮 Linux／macOS 的對應產物，也還沒有 Web 頁面。
+現況：目前只有 **Windows + PowerShell 7** 的實作（`CodexRunLog.ps1`），尚未考慮 Linux／macOS 的對應產物，也還沒有 Web 頁面。
 
 ---
 
 ## 1. 跨平台（Linux / macOS）
 
-> 目前 `Codex運行日誌.ps1` 綁定 Windows（`%USERPROFILE%`、`.ps1`、PowerShell 7）。Codex 本身與 rollout 格式是跨平台的，只有「讀取端」缺對應實作。
+> 目前 `CodexRunLog.ps1` 綁定 Windows（`%USERPROFILE%`、`.ps1`、PowerShell 7）。Codex 本身與 rollout 格式是跨平台的，只有「讀取端」缺對應實作。
 
 - [ ] 決定跨平台策略（二選一）
   - [ ] **(A) 單一跨平台 CLI**：用 Node/TypeScript 或 Python 改寫核心（讀 rollout、解析、上色、`--tail`），Windows 不再依賴 PowerShell。
@@ -74,7 +74,7 @@
 
 - [ ] 補足未覆蓋的測試：時間軸事件排序、設定檔讀寫（`Get-IniValue`／`Set-IniValue`）、`Read-AppendedLines` 位移讀取。
 - [ ] 封裝／安裝：一鍵安裝到 PATH、版本號、`--version`。
-- [ ] 文件：`TODO.md` 與 `Docs/Codex運行日誌.md`、`ChangeHistory.md` 交叉連結維護。
+- [ ] 文件：`TODO.md` 與 `Docs/CodexRunLog.md`、`ChangeHistory.md` 交叉連結維護。
 
 ---
 

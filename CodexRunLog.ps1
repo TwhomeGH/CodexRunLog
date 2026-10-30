@@ -29,9 +29,9 @@
     若都找不到，會提示手動輸入，並把結果寫回 CodexRunlog.ini。
 
 .EXAMPLE
-    .\Codex運行日誌.ps1
-    .\Codex運行日誌.ps1 -Limit 100
-    .\Codex運行日誌.ps1 -Tail -Interval 3
+    .\CodexRunLog.ps1
+    .\CodexRunLog.ps1 -Limit 100
+    .\CodexRunLog.ps1 -Tail -Interval 3
 #>
 [CmdletBinding()]
 param(

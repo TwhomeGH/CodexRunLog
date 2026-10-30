@@ -2,7 +2,7 @@
 
 把 Codex 每次實際執行的指令，從 rollout 記錄中撈出來、依語言上色後輸出，讓你**明確知道 Codex 在幹嘛**。
 
-- 主程式：`Codex運行日誌.ps1`
+- 主程式：`CodexRunLog.ps1`
 - 環境：**Windows + PowerShell 7**（腳本有 `#requires -Version 7.0`）
 
 ---
@@ -42,19 +42,19 @@
 
 ```powershell
 # 最新 50 筆指令
-.\Codex運行日誌.ps1
+.\CodexRunLog.ps1
 
 # 最新 100 筆
-.\Codex運行日誌.ps1 -Limit 100
+.\CodexRunLog.ps1 -Limit 100
 
 # 持續監看後續新紀錄（每 2 秒輪詢）
-.\Codex運行日誌.ps1 -Tail
+.\CodexRunLog.ps1 -Tail
 
 # 自訂輪詢間隔（秒）
-.\Codex運行日誌.ps1 -Tail -Interval 3
+.\CodexRunLog.ps1 -Tail -Interval 3
 
 # 指定其他 sessions 目錄（會覆蓋設定檔）
-.\Codex運行日誌.ps1 -SessionsDir 'D:\codex\sessions'
+.\CodexRunLog.ps1 -SessionsDir 'D:\codex\sessions'
 ```
 
 ### 參數
@@ -212,7 +212,7 @@ pwsh -File .\scripts\check.ps1
 
 ```powershell
 # 新增一筆（會插到最前面）
-changelogkit add "一句話標題" --type 修復 --file Codex運行日誌.ps1
+changelogkit add "一句話標題" --type 修復 --file CodexRunLog.ps1
 
 # 檢索 / 顯示 / 網頁 / 匯出
 changelogkit list

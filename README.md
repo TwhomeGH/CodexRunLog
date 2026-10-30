@@ -25,13 +25,13 @@ Codex 在對話中常只顯示指令的摘要或截斷片段，長指令（例�
 
 ```powershell
 # 最新 50 筆
-.\Codex運行日誌.ps1
+.\CodexRunLog.ps1
 
 # 最新 100 筆
-.\Codex運行日誌.ps1 -Limit 100
+.\CodexRunLog.ps1 -Limit 100
 
 # 持續監看後續新紀錄（每 2 秒輪詢，Ctrl+C 結束）
-.\Codex運行日誌.ps1 -Tail
+.\CodexRunLog.ps1 -Tail
 ```
 
 輸出範例：
@@ -66,7 +66,7 @@ sessions 目錄解析順序：`-SessionsDir` 參數 → `CodexRunlog.ini` → `%
 
 ## 文件
 
-- 完整使用說明：[Docs/Codex運行日誌.md](Docs/Codex運行日誌.md)
+- 完整使用說明：[Docs/CodexRunLog.md](Docs/CodexRunLog.md)
 - 更新歷史（changelogkit 維護）：[Docs/ChangeHistory.md](Docs/ChangeHistory.md)
 - 待辦與規劃：[TODO.md](TODO.md)
 

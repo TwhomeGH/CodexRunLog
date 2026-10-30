@@ -20,7 +20,7 @@ Write-Host '== PSScriptAnalyzer ==' -ForegroundColor Cyan
 Import-Module PSScriptAnalyzer -ErrorAction Stop
 $settings = Join-Path $root 'PSScriptAnalyzerSettings.psd1'
 $targets = @(
-    (Join-Path $root 'Codex運行日誌.ps1'),
+    (Join-Path $root 'CodexRunLog.ps1'),
     (Join-Path $root 'tests/CodexRunlog.Tests.ps1')
 )
 $issues = @(foreach ($t in $targets) { Invoke-ScriptAnalyzer -Path $t -Settings $settings })
@@ -49,7 +49,7 @@ if ($result.FailedCount -gt 0 -or $result.TotalCount -eq 0) {
 Write-Host '== 冒煙測試 ==' -ForegroundColor Cyan
 if ($IsWindows) {
     $fixture = Join-Path $root 'tests/fixtures/sessions'
-    $script = Join-Path $root 'Codex運行日誌.ps1'
+    $script = Join-Path $root 'CodexRunLog.ps1'
     $out = & $script -SessionsDir $fixture -Limit 10 6>&1 2>&1 | Out-String
     if ($out -match 'git status') {
         Write-Host '冒煙測試: 通過' -ForegroundColor Green

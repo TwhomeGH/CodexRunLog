@@ -1,7 +1,7 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
 
 BeforeAll {
-    $scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Codex運行日誌.ps1'
+    $scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'CodexRunLog.ps1'
     . $scriptPath          # 只載入函式（主流程會被 dot-source 守衛擋下）
 }
 

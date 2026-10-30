@@ -1,5 +1,27 @@
 # Codex 運行日誌 — 改動說明
 
+## 2026.10.30 21:38 更名為 CodexRunLog（腳本與文件）
+
+**類型**: 變更 · **檔案**: `CodexRunLog.ps1`、`Docs/CodexRunLog.md`
+
+### 問題 - 中文檔名不易輸入、與 repo 名稱不一致
+
+腳本原名 `Codex運行日誌.ps1`，在跨平台／CI／指令列輸入時不便，也和 repo `CodexRunlog` 不一致。
+
+### 根因 - 命名與專案識別脫節
+
+檔名使用中文描述性名稱，但專案與 remote 皆為 `CodexRunLog`；文件亦沿用中文檔名，形成中英混雜。
+
+### 修改 - 統一為 CodexRunLog
+
+- `git mv` 將腳本更名為 `CodexRunLog.ps1`、文件更名為 `Docs/CodexRunLog.md`（保留 git 歷史）。
+- 同步更新 `.EXAMPLE`、`README.md`、`TODO.md`、`tests/`、`scripts/check.ps1` 的引用，以及 ChangeHistory 內的連結目標。
+- 歷史條目中的 `**檔案**` 與敘述維持原文（不改寫歷史）；`CodexRunLog.ps1` 內的說明文字「Codex 運行日誌」保留為描述性標題。
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
 ## 2026.10.15 06:56 修正單引號／反引號 cmd 被漏抓
 
 **類型**: 修復 · **檔案**: `Codex運行日誌.ps1`
@@ -18,7 +40,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - `Get-ExecFromJs` 的括號掃描改為字串感知：雙引號、單引號、反引號樣板內的 `{ }` 一律不算。
 - 修正建構樣式的陣列寫法（PowerShell 逗號優先於 `+`，需加括號），並補上對應測試。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -40,7 +62,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - 新增 `Get-MaxEventTime` / `Select-NewEvents`：以「時間下限」只輸出較新的事件，略過重播的舊內容；時間未知（null）者仍保留。
 - 一般模式維持「最新在上」不變。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -58,7 +80,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - 加入需求、快速開始、輸出範例、參數表、資料來源說明。
 - 連結完整說明、更新歷史與 TODO。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -76,7 +98,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - 需在 repo Settings → Pages → Source 選「GitHub Actions」。
 - 新增 `.gitattributes`（`* text=auto eol=lf`）統一換行，消除 CRLF 警告。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -96,7 +118,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - 新增 `.github/workflows/ci.yml`：Windows／Ubuntu／macOS 三平台執行。
 - 測試 fixture 路徑與預設 sessions 目錄改用 `/` 分隔，提升跨平台性。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -114,7 +136,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - 主腳本加入 **dot-source 守衛**：`if ($MyInvocation.InvocationName -eq '.') { return }`，讓測試只載入函式、不觸發主流程。
 - 執行：`Invoke-Pester .\tests\CodexRunlog.Tests.ps1 -Output Detailed`（已寫入說明文件）。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -149,7 +171,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - 以 `changelogkit add` 建立各筆骨架，再補上問題／根因／修改內文。
 - 可用 `changelogkit list`、`show`、`serve`（網頁 GUI）、`export` 檢索與匯出。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -166,7 +188,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - 說明緣起、資料來源（rollout JSONL 與新舊兩代格式）、用法與參數。
 - 附輸出範例、上色圖例、運作原理、疑難排解、限制與待辦。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
@@ -185,7 +207,7 @@ Codex 的 `payload.input` 會依內容改用不同引號：雙引號 `cmd:"…"`
 - ini 指到的路徑若失效會自動忽略，改找本機預設，維持可攜。
 - `-SessionsDir` 為明確指定，路徑不存在時直接報錯，不退回自動解析。
 
-**相關文件**: [Codex運行日誌.md](Codex運行日誌.md)
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
 
 ---
 
