@@ -61,10 +61,13 @@
 
 | 參數 | 型別 | 預設 | 說明 |
 | --- | --- | --- | --- |
-| `-Limit` | int | `50` | 起始顯示筆數；一般模式最新在上，`-Tail` 模式則由舊到新 |
+| `-Limit` | int | `50` | 取最新的 N 筆；輸出由舊到新（最新在最下方），與 `-Tail` 一致 |
 | `-Tail` | switch | 關 | 印完起始內容後，輪詢並即時輸出後續新紀錄（由舊到新，最新在最底部） |
 | `-Interval` | int | `2` | `-Tail` 的輪詢間隔秒數 |
 | `-SessionsDir` | string | 自動解析 | rollout JSONL 根目錄；省略時依「設定檔 → `%USERPROFILE%\.codex\sessions` → 手動輸入」解析 |
+| `-OutputLines` | int | `8` | 每筆結果最多顯示頭尾各 N 行；`0` 表示全部 |
+| `-NoOutput` | switch | 關 | 不顯示執行結果 |
+| `-Diag` | switch | 關 | 診斷：列出各 rollout 檔的活動時間、mtime、大小、指令／結果數 |
 
 > 本表為速查。參數與用法的**權威來源是程式內的註解說明**，執行 `Get-Help .\CodexRunLog.ps1 -Full`（另有 `-Examples`、`-Online`）即可取得；修改參數時請一併更新註解。
 
@@ -126,7 +129,7 @@ sessions = C:\Users\someone\.codex\sessions
 
 ## 運作原理
 
-1. **掃檔**：列出所有 `rollout-*.jsonl`，依 `LastWriteTime` 由新到舊處理，累積到 `-Limit` 筆就停。
+1. **掃檔**：列出所有 `rollout-*.jsonl`，依「最後事件時間」由新到舊處理（避免 mtime 過期），累積到 `-Limit` 筆就停。
 2. **取指令事件**：只解析含 `exec_command` / `shell_command` 關鍵字的行（先做便宜的字串預篩，省去大量 JSON 解析），還原轉義後取出 `cmd` / `justification` / `sandbox_permissions` / `workdir`。`cmd` 可能是雙引號、單引號或反引號樣板字串（多行），三種都會解析。
 3. **語言判斷**：
    - here-string（`@'…'@` / `@"…"@`）先看內容是 Python（`import` / `def` / `print(`）還是 JavaScript（`require(` / `=>` / `const`）。

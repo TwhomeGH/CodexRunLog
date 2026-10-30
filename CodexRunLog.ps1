@@ -13,11 +13,12 @@
               payload.arguments 為 JSON（cmd / command / workdir / shell）
     cmd 可能以雙引號、單引號或反引號樣板字串（可跨行）包住，皆會解析。
     相較 SQLite 的 feedback_log_body（會被 Codex 截斷），rollout 是完整指令。
+    每筆指令會以 call_id 配對其執行結果（custom_tool_call_output / function_call_output）。
 
     注意：本工具目前僅支援 Windows + PowerShell 7。
 
 .PARAMETER Limit
-    起始顯示的指令筆數（由新到舊）。預設 50。
+    取最新的 N 筆指令。輸出由舊到新（最新在最下方）。預設 50。
 
 .PARAMETER Tail
     持續監看：印完起始內容後，輪詢各 rollout 檔新增的行並即時輸出。
@@ -30,6 +31,16 @@
     rollout JSONL 根目錄。省略時依序嘗試：
     設定檔 CodexRunlog.ini → %USERPROFILE%\.codex\sessions。
     若都找不到，會提示手動輸入，並把結果寫回 CodexRunlog.ini。
+
+.PARAMETER OutputLines
+    每筆指令結果最多顯示的行數（開頭與結尾各 N 行）。預設 8；設 0 表示全部顯示。
+
+.PARAMETER NoOutput
+    不顯示指令的執行結果，只列指令本身。
+
+.PARAMETER Diag
+    診斷模式：列出各 rollout 檔的最後事件時間、mtime、大小與指令／結果數量，
+    用來確認「資料在哪、為何沒抓到最新指令」，不輸出一般清單。
 
 .EXAMPLE
     顯示最新 50 筆指令。
@@ -47,6 +58,10 @@
     指定 rollout 根目錄。
     PS C:\> .\CodexRunLog.ps1 -SessionsDir 'D:\codex\sessions'
 
+.EXAMPLE
+    診斷：檢查各 rollout 檔的活動時間與指令數量。
+    PS C:\> .\CodexRunLog.ps1 -Diag
+
 .NOTES
     相關文件：Docs/CodexRunLog.md（完整說明）、Docs/ChangeHistory.md（更新歷史）、TODO.md（待辦）。
     參數與用法以 Get-Help .\CodexRunLog.ps1 -Full 為準。
@@ -62,7 +77,10 @@ param(
     [int]$Limit = 50,
     [switch]$Tail,
     [int]$Interval = 2,
-    [string]$SessionsDir = ''
+    [string]$SessionsDir = '',
+    [int]$OutputLines = 8,
+    [switch]$NoOutput,
+    [switch]$Diag
 )
 #Requires -Version 7.0
 
@@ -72,6 +90,12 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ESC = [char]27
 $ConfigPath = Join-Path $PSScriptRoot 'CodexRunlog.ini'
+
+# 顯示選項集中一處（供 Show-Output 使用），也讓參數在頂層被明確引用
+$script:Options = [pscustomobject]@{
+    OutputLines = [int]$OutputLines
+    ShowOutput  = -not $NoOutput
+}
 
 function Color {
     param([string]$Code, [string]$Text)
@@ -257,8 +281,9 @@ function Get-CommandEventsFromLine {
             if ($p.name -ne 'exec') { break }
             foreach ($e in (Get-ExecFromJs $p.input)) {
                 if (-not $e.Workdir) { $e.Workdir = $DefaultWorkdir }
-                $e | Add-Member -NotePropertyName Time   -NotePropertyValue $time   -Force
-                $e | Add-Member -NotePropertyName Source -NotePropertyValue $Source -Force
+                $e | Add-Member -NotePropertyName Time   -NotePropertyValue $time       -Force
+                $e | Add-Member -NotePropertyName Source -NotePropertyValue $Source     -Force
+                $e | Add-Member -NotePropertyName CallId -NotePropertyValue $p.call_id  -Force
                 $out.Add($e)
             }
         }
@@ -277,6 +302,7 @@ function Get-CommandEventsFromLine {
                     Sandbox       = $a.sandbox_permissions
                     Workdir       = $wd
                     Source        = $Source
+                    CallId        = $p.call_id
                 })
             }
         }
@@ -405,13 +431,135 @@ function Expand-PowerShellStatements {
 
 # ── 掃描 rollout 檔，取得最近 N 筆指令 ───────────────────────────────
 function Get-RolloutFiles {
-    return Get-ChildItem -LiteralPath $SessionsDir -Recurse -Filter 'rollout-*.jsonl' -File -ErrorAction SilentlyContinue |
+    param([string]$Root = $SessionsDir)
+    return Get-ChildItem -LiteralPath $Root -Recurse -Filter 'rollout-*.jsonl' -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending
+}
+
+# 依「檔案最後事件時間」排序（活動中檔案 mtime 可能過期，不能只信 mtime）
+function Get-RolloutFilesByActivity {
+    param([string]$Root = $SessionsDir)
+    $items = foreach ($f in (Get-RolloutFiles -Root $Root)) {
+        $t = Get-FileLastEventTime $f.FullName
+        $key = if ($null -ne $t) { $t } else { [DateTimeOffset]$f.LastWriteTime }
+        [pscustomobject]@{ File = $f; Key = $key }
+    }
+    return @($items | Sort-Object Key -Descending | ForEach-Object { $_.File })
 }
 
 function Test-HasCommand {
     param([string]$Line)
     return ($Line.IndexOf('exec_command') -ge 0) -or ($Line.IndexOf('shell_command') -ge 0)
+}
+
+function Test-HasOutput {
+    param([string]$Line)
+    return ($Line.IndexOf('call_id') -ge 0) -and
+           (($Line.IndexOf('custom_tool_call_output') -ge 0) -or ($Line.IndexOf('function_call_output') -ge 0))
+}
+
+function Test-HasRelevant {
+    param([string]$Line)
+    return (Test-HasCommand $Line) -or ($Line.IndexOf('FileChange') -ge 0)
+}
+
+# 讀檔尾一小段取最後一個 timestamp；活動中的檔案 mtime 可能不會即時更新
+function Get-FileLastEventTime {
+    param([string]$Path)
+    $fs = $null; $buf = $null; $read = 0
+    try {
+        $fs = Open-SharedRead $Path
+        $len = $fs.Length
+        if ($len -le 0) { return $null }
+        $start = [Math]::Max(0L, $len - 65536)
+        $fs.Seek($start, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $buf = New-Object byte[] ([int]($len - $start))
+        while ($read -lt $buf.Length) {
+            $n = $fs.Read($buf, $read, $buf.Length - $read)
+            if ($n -le 0) { break }
+            $read += $n
+        }
+    } catch { return $null } finally { if ($fs) { $fs.Dispose() } }
+    $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+    $lines = $text -split "`n"
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $m = [regex]::Match($lines[$i], '"timestamp"\s*:\s*"([^"]+)"')
+        if ($m.Success) {
+            try { return [DateTimeOffset]::Parse($m.Groups[1].Value).ToLocalTime() } catch { return $null }
+        }
+    }
+    return $null
+}
+
+# 把 output 欄位（字串或內容區塊陣列）攤平成純文字
+function Get-OutputText {
+    param($Output)
+    if ($null -eq $Output) { return $null }
+    if ($Output -is [string]) { return $Output }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    if ($Output -is [System.Collections.IEnumerable]) {
+        foreach ($item in $Output) {
+            if ($null -eq $item) { continue }
+            if ($item -is [string]) { [void]$parts.Add($item) }
+            elseif ($item.PSObject.Properties['text']) { [void]$parts.Add([string]$item.text) }
+            else { [void]$parts.Add(($item | ConvertTo-Json -Depth 5 -Compress)) }
+        }
+    } elseif ($Output.PSObject.Properties['text']) {
+        [void]$parts.Add([string]$Output.text)
+    } else {
+        [void]$parts.Add(($Output | ConvertTo-Json -Depth 5 -Compress))
+    }
+    return ($parts -join "`n")
+}
+
+# 從 exec 的輸出 JSON 取出 exit code／耗時與真正的 output 文字
+function Format-ExecOutput {
+    param($Output)
+    $raw = Get-OutputText $Output
+    $result = [pscustomobject]@{ Text = $raw; ExitCode = $null; WallTime = $null }
+    if (-not $raw) { return $result }
+    $me = [regex]::Match($raw, '"exit_code"\s*:\s*(-?\d+)')
+    if ($me.Success) { $result.ExitCode = [int]$me.Groups[1].Value }
+    $mw = [regex]::Match($raw, '"wall_time_seconds"\s*:\s*([0-9.]+)')
+    if ($mw.Success) { $result.WallTime = [double]$mw.Groups[1].Value }
+    $mo = [regex]::Match($raw, '"output"\s*:\s*"((?:\\.|[^"\\])*)"')
+    if ($mo.Success) { $result.Text = ConvertFrom-EscapedString $mo.Groups[1].Value }
+    return $result
+}
+
+function Get-ToolOutputsFromLine {
+    param([string]$Line)
+    $o = $null
+    try { $o = $Line | ConvertFrom-Json } catch { return $null }
+    if ($o.type -ne 'response_item') { return $null }
+    $p = $o.payload
+    if ($null -eq $p -or -not $p.call_id) { return $null }
+    if ($p.type -ne 'custom_tool_call_output' -and $p.type -ne 'function_call_output') { return $null }
+    $fmt = Format-ExecOutput $p.output
+    $time = $null
+    if ($o.timestamp) { try { $time = ([DateTimeOffset]([datetime]$o.timestamp)).ToLocalTime() } catch { Write-Verbose 'timestamp 解析失敗' } }
+    return [pscustomobject]@{
+        CallId   = $p.call_id
+        Time     = $time
+        Output   = $fmt.Text
+        ExitCode = $fmt.ExitCode
+        WallTime = $fmt.WallTime
+    }
+}
+
+# 依 call_id 把輸出掛回對應的指令事件
+function Join-EventsWithOutputs {
+    param($Calls, $Outputs)
+    if ($null -eq $Outputs -or $Outputs.Count -eq 0) { return $Calls }
+    foreach ($c in $Calls) {
+        if ($c.CallId -and $Outputs.ContainsKey($c.CallId)) {
+            $o = $Outputs[$c.CallId]
+            $c | Add-Member -NotePropertyName Output   -NotePropertyValue $o.Output   -Force
+            $c | Add-Member -NotePropertyName ExitCode -NotePropertyValue $o.ExitCode -Force
+            $c | Add-Member -NotePropertyName WallTime -NotePropertyValue $o.WallTime -Force
+        }
+    }
+    return $Calls
 }
 
 $script:WorkdirCache = @{}
@@ -465,23 +613,79 @@ function Get-SessionCwd {
     return $cwd
 }
 
-function Get-RecentEvents {
-    param([int]$Need)
-    $all = [System.Collections.Generic.List[object]]::new()
-    foreach ($f in (Get-RolloutFiles)) {
-        $cwd = Get-SessionCwd $f.FullName
+# 讀檔重試：Codex 寫入中可能短暫鎖檔，重試幾次再放棄
+function Read-SharedLinesWithRetry {
+    param([string]$Path, [int]$Attempts = 4)
+    for ($i = 0; $i -lt $Attempts; $i++) {
         try {
-            foreach ($line in (Read-SharedLines $f.FullName)) {
-                if (-not (Test-HasCommand $line)) { continue }
-                foreach ($ev in (Get-CommandEventsFromLine $line $f.FullName $cwd)) { $all.Add($ev) }
-            }
-        } catch { continue }
-        if ($all.Count -ge $Need) { break }
+            $lines = @(Read-SharedLines $Path)
+            return ,$lines
+        } catch {
+            Write-Verbose "讀取失敗（第 $($i + 1)/$Attempts 次）：$Path：$($_.Exception.Message)"
+            if ($i -lt $Attempts - 1) { Start-Sleep -Milliseconds 150 }
+        }
     }
-    return @($all | Sort-Object Time -Descending | Select-Object -First $Need)
+    return $null
+}
+
+function Get-RecentEvents {
+    param([int]$Need, [string]$Root = $SessionsDir)
+    $calls = [System.Collections.Generic.List[object]]::new()
+    $outputs = @{}
+    foreach ($f in (Get-RolloutFilesByActivity -Root $Root)) {
+        $cwd = Get-SessionCwd $f.FullName
+        $lines = Read-SharedLinesWithRetry $f.FullName
+        if ($null -eq $lines) {
+            # 不再靜默跳過：讓使用者知道有一整個檔讀不到
+            Write-Host (Color '93' "⚠ 無法讀取，已跳過：$($f.Name)（可能被 Codex 鎖住，稍後重試）")
+            continue
+        }
+        # 逐行容錯：單行壞掉不影響整個檔
+        foreach ($line in $lines) {
+            try {
+                if (Test-HasCommand $line) {
+                    foreach ($ev in (Get-CommandEventsFromLine $line $f.FullName $cwd)) { $calls.Add($ev) }
+                } elseif (Test-HasOutput $line) {
+                    $rec = Get-ToolOutputsFromLine $line
+                    if ($rec) { $outputs[$rec.CallId] = $rec }
+                }
+            } catch { Write-Verbose "略過一行（解析失敗）：$($_.Exception.Message)" }
+        }
+        if ($calls.Count -ge $Need) { break }
+    }
+    [void](Join-EventsWithOutputs $calls $outputs)
+    return @($calls | Sort-Object Time -Descending | Select-Object -First $Need)
 }
 
 # ── 輸出 ─────────────────────────────────────────────────────────────
+function Show-Output {
+    param($e)
+    if (-not $script:Options.ShowOutput) { return }
+    if (-not $e.Output) { return }
+    $MaxLines = $script:Options.OutputLines
+
+    $meta = @()
+    if ($null -ne $e.ExitCode) { $meta += "exit=$($e.ExitCode)" }
+    if ($null -ne $e.WallTime) { $meta += ('{0:N1}s' -f [double]$e.WallTime) }
+    $label = '結果'
+    if ($meta.Count -gt 0) { $label += '（' + ($meta -join ' · ') + '）' }
+    Write-Host ('  ' + (Color '90' '↳ ') + (Color '36' $label))
+
+    $arr = @($e.Output -split "`r?`n")
+    while ($arr.Count -gt 0 -and $arr[-1] -eq '') {
+        if ($arr.Count -eq 1) { $arr = @(); break }
+        $arr = @($arr[0..($arr.Count - 2)])
+    }
+    $total = $arr.Count
+    if ($MaxLines -le 0 -or $total -le 2 * $MaxLines) {
+        foreach ($line in $arr) { Write-Host ('  ' + (Color '90' $line)) }
+    } else {
+        foreach ($line in $arr[0..($MaxLines - 1)]) { Write-Host ('  ' + (Color '90' $line)) }
+        Write-Host ('  ' + (Color '90' "…（省略 $($total - 2 * $MaxLines) 行）"))
+        foreach ($line in $arr[($total - $MaxLines)..($total - 1)]) { Write-Host ('  ' + (Color '90' $line)) }
+    }
+}
+
 function Show-Event {
     param($e)
     $lang  = Get-CodeLanguage $e.Cmd
@@ -510,6 +714,7 @@ function Show-Event {
     if ($e.Justification) {
         Write-Host ('  ' + (Color '90' '↳ ') + (Color '93' $e.Justification))
     }
+    if ($e.Output) { Show-Output $e }
     Write-Host ''
 }
 
@@ -593,15 +798,48 @@ function Select-NewEvents {
 }
 
 # 被 dot-source 時（例如單元測試載入函式）不執行主流程
+# 診斷：列出各 rollout 檔的活動時間與指令／結果數量
+function Show-Diagnostics {
+    param([string]$Root)
+    Write-Host (Color '97' "sessions 根目錄：$Root")
+    $files = Get-RolloutFilesByActivity -Root $Root
+    Write-Host (Color '90' "共 $($files.Count) 個 rollout 檔，依「最後事件時間」排序（前 12 個）：")
+    $i = 0
+    foreach ($f in ($files | Select-Object -First 12)) {
+        $i++
+        $last = Get-FileLastEventTime $f.FullName
+        $lastText = if ($last) { $last.ToString('yyyy-MM-dd HH:mm:ss') } else { '(無 timestamp)' }
+        if ($f.Length -le 20MB) {
+            $calls = 0; $outs = 0
+            try {
+                foreach ($line in (Read-SharedLines $f.FullName)) {
+                    if ($line -match '"type"\s*:\s*"(custom_tool_call|function_call)"') { $calls++ }
+                    elseif ($line -match '"type"\s*:\s*"(custom_tool_call_output|function_call_output)"') { $outs++ }
+                }
+            } catch { Write-Verbose "診斷讀取失敗：$($_.Exception.Message)" }
+            $stat = "calls=$calls outputs=$outs"
+            if ($calls -eq 0) { $stat += '  ← 無指令（可能是審查執行緒）' }
+        } else {
+            $stat = '（檔案過大，略過統計）'
+        }
+        Write-Host ("  {0,2}. {1}  mtime={2}  size={3,8}  last={4}  {5}" -f $i, $f.Name, $f.LastWriteTime.ToString('MM-dd HH:mm'), $f.Length, $lastText, $stat)
+    }
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 $SessionsDir = Resolve-SessionsDir $SessionsDir
 
+if ($Diag) {
+    Show-Diagnostics $SessionsDir
+    return
+}
+
 $events = @(Get-RecentEvents $Limit)
 
 if (-not $Tail) {
-    # 一般模式：最新在上，方便一眼看到最近的動作
-    foreach ($e in $events) { Show-Event $e }
+    # 由舊到新輸出：最新永遠在最下方，與 -Tail 一致
+    foreach ($e in ($events | Sort-Object Time)) { Show-Event $e }
     return
 }
 
@@ -620,10 +858,12 @@ foreach ($f in (Get-RolloutFiles)) {
 }
 
 Write-Host (Color '90' "── 監看中（每 $Interval 秒輪詢；新事件接續於下方，Ctrl+C 結束）──")
+$pending = @{}
 while ($true) {
     Start-Sleep -Seconds $Interval
 
-    $batch = [System.Collections.Generic.List[object]]::new()
+    $calls = [System.Collections.Generic.List[object]]::new()
+    $outs = @{}
     foreach ($f in (Get-RolloutFiles)) {
         $path = $f.FullName
         if (-not $offsets.ContainsKey($path)) {
@@ -643,15 +883,39 @@ while ($true) {
 
         $cwd = Get-SessionCwd $path
         foreach ($line in $r.Lines) {
-            if (-not (Test-HasCommand $line)) { continue }
-            $lineEvents = Get-CommandEventsFromLine $line $path $cwd
-            foreach ($ev in (Select-NewEvents $lineEvents $floor)) { $batch.Add($ev) }
+            if (Test-HasCommand $line) {
+                foreach ($ev in (Get-CommandEventsFromLine $line $path $cwd)) { $calls.Add($ev) }
+            } elseif (Test-HasOutput $line) {
+                $rec = Get-ToolOutputsFromLine $line
+                if ($rec) { $outs[$rec.CallId] = $rec }
+            }
         }
     }
 
-    if ($batch.Count -gt 0) {
-        $sorted = @($batch | Sort-Object Time)
-        foreach ($e in $sorted) { Show-Event $e }
-        $floor = Get-MaxEventTime $sorted $floor
+    [void](Join-EventsWithOutputs $calls $outs)
+
+    $newCalls = @(Select-NewEvents $calls $floor | Sort-Object Time)
+    foreach ($e in $newCalls) {
+        if (-not $e.Output -and $e.CallId) { $pending[$e.CallId] = $e }
+        Show-Event $e
     }
+
+    # 先前已輸出、結果晚到的指令：補印結果
+    foreach ($id in @($outs.Keys)) {
+        if (-not $pending.ContainsKey($id)) { continue }
+        $ev = $pending[$id]
+        if ($ev.Output) { $pending.Remove($id); continue }
+        $o = $outs[$id]
+        $ev | Add-Member -NotePropertyName Output   -NotePropertyValue $o.Output   -Force
+        $ev | Add-Member -NotePropertyName ExitCode -NotePropertyValue $o.ExitCode -Force
+        $ev | Add-Member -NotePropertyName WallTime -NotePropertyValue $o.WallTime -Force
+        Write-Host (Color '90' ('─' * 78))
+        Write-Host ((Color '90' '結果（較早指令）') + '  ' + (Color '90' $ev.Time.ToString('yyyy/MM/dd HH:mm:ss')))
+        Show-Output $ev
+        Write-Host ''
+        $pending.Remove($id)
+    }
+
+    $floor = Get-MaxEventTime @($newCalls) $floor
+    foreach ($o in @($outs.Values)) { if ($o.Time -and $o.Time -gt $floor) { $floor = $o.Time } }
 }

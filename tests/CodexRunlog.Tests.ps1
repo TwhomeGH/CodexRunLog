@@ -324,7 +324,12 @@ Describe 'Get-Help 與文件一致性（防文檔漂移）' {
     It 'Get-Help 具備完整段落（Synopsis／Description／參數／範例）' {
         [bool]$help.Synopsis | Should -BeTrue
         $help.Description.Count | Should -BeGreaterThan 0
-        $help.Parameters.Parameter.Count | Should -Be 4
+        $help.Parameters.Parameter.Count | Should -BeGreaterThan 0
+        $tokens = $null; $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $root 'CodexRunLog.ps1'), [ref]$tokens, [ref]$errs)
+        $astParams = @($ast.ParamBlock.Parameters.Name.VariablePath.UserPath)
+        ((@($help.Parameters.Parameter.Name) | Sort-Object) -join ',') | Should -Be (($astParams | Sort-Object) -join ',')
         $help.Examples.Example.Count | Should -BeGreaterOrEqual 3
     }
 
@@ -335,5 +340,108 @@ Describe 'Get-Help 與文件一致性（防文檔漂移）' {
             $readme | Should -Match ([regex]::Escape('-' + $p))
             $docs | Should -Match ([regex]::Escape('-' + $p))
         }
+    }
+}
+
+Describe '指令結果（output 配對與解析）' {
+    It 'Get-OutputText 攤平內容區塊陣列' {
+        $raw = @(
+            [pscustomobject]@{ type = 'input_text'; text = 'a' },
+            [pscustomobject]@{ type = 'input_text'; text = 'b' }
+        )
+        Get-OutputText $raw | Should -Be "a`nb"
+    }
+
+    It 'Get-OutputText 支援純字串' {
+        Get-OutputText 'hello' | Should -Be 'hello'
+    }
+
+    It 'Format-ExecOutput 取出 exit_code／耗時／output 文字' {
+        $json = '{"chunk_id":"x","exit_code":7,"wall_time_seconds":1.5,"output":"line1\nline2"}'
+        $r = Format-ExecOutput @([pscustomobject]@{ type = 'input_text'; text = $json })
+        $r.ExitCode | Should -Be 7
+        $r.WallTime | Should -Be 1.5
+        $r.Text | Should -Be "line1`nline2"
+    }
+
+    It 'Get-ToolOutputsFromLine 解析輸出記錄' {
+        $line = '{"timestamp":"2026-10-30T13:00:00Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_x","output":[{"type":"input_text","text":"{\"exit_code\":0,\"wall_time_seconds\":0.2,\"output\":\"ok\"}"}]}}'
+        $r = Get-ToolOutputsFromLine $line
+        $r.CallId | Should -Be 'call_x'
+        $r.Output | Should -Be 'ok'
+        $r.ExitCode | Should -Be 0
+    }
+
+    It 'Get-ToolOutputsFromLine 對非輸出記錄回傳空值' {
+        $line = '{"type":"response_item","payload":{"type":"message"}}'
+        Get-ToolOutputsFromLine $line | Should -BeNullOrEmpty
+    }
+
+    It 'Join-EventsWithOutputs 依 call_id 掛回輸出' {
+        $call = [pscustomobject]@{ CallId = 'call_x'; Cmd = 'echo hi' }
+        $outs = @{ 'call_x' = [pscustomobject]@{ CallId = 'call_x'; Output = 'hi'; ExitCode = 0; WallTime = 0.1 } }
+        $r = @(Join-EventsWithOutputs @($call) $outs)
+        $r[0].Output | Should -Be 'hi'
+        $r[0].ExitCode | Should -Be 0
+    }
+}
+
+Describe '檔案排序不受過期 mtime 影響' {
+    BeforeAll {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-order-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $a = Join-Path $tmp 'rollout-a.jsonl'
+        $b = Join-Path $tmp 'rollout-b.jsonl'
+        Set-Content -LiteralPath $a -Encoding utf8 -Value '{"timestamp":"2026-10-30T13:30:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"NEW_CMD\"})"}}'
+        Set-Content -LiteralPath $b -Encoding utf8 -Value '{"timestamp":"2026-10-29T00:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"OLD_CMD\"})"}}'
+        # A 的 mtime 較舊，但事件較新；舊程式依 mtime 會排錯
+        (Get-Item -LiteralPath $a).LastWriteTime = [datetime]'2026-10-01 00:00:00'
+        (Get-Item -LiteralPath $b).LastWriteTime = [datetime]'2026-10-30 20:00:00'
+    }
+
+    AfterAll {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force }
+    }
+
+    It 'Get-FileLastEventTime 取得檔案最後事件時間' {
+        $t = Get-FileLastEventTime (Join-Path $tmp 'rollout-a.jsonl')
+        $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-10-30T13:30:00Z'
+    }
+
+    It 'Get-RolloutFilesByActivity 以最後事件時間排序' {
+        $files = @(Get-RolloutFilesByActivity -Root $tmp)
+        $files.Count | Should -Be 2
+        (Split-Path $files[0].FullName -Leaf) | Should -Be 'rollout-a.jsonl'
+    }
+
+    It 'Get-RecentEvents 先回傳事件較新的檔案' {
+        $ev = @(Get-RecentEvents -Need 5 -Root $tmp)
+        $ev[0].Cmd | Should -Be 'NEW_CMD'
+    }
+}
+
+Describe '讀取容錯（不因單行或鎖檔丟掉整個檔）' {
+    BeforeAll {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-robust-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $f = Join-Path $tmp 'rollout-r.jsonl'
+        Set-Content -LiteralPath $f -Encoding utf8 -Value @(
+            '{"timestamp":"2026-10-30T13:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"GOOD_CMD\"})"}}',
+            '{ this is not json',
+            '{"timestamp":"2026-10-30T13:01:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"GOOD_CMD2\"})"}}'
+        )
+    }
+
+    AfterAll {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force }
+    }
+
+    It '單行壞掉不會丟掉整個檔案' {
+        $ev = @(Get-RecentEvents -Need 10 -Root $tmp)
+        (($ev.Cmd | Sort-Object) -join ',') | Should -Be 'GOOD_CMD,GOOD_CMD2'
+    }
+
+    It 'Read-SharedLinesWithRetry 讀不到回傳空值' {
+        Read-SharedLinesWithRetry (Join-Path $tmp 'nope.jsonl') | Should -BeNullOrEmpty
     }
 }

@@ -1,5 +1,75 @@
 # Codex 運行日誌 — 改動說明
 
+## 2026.10.30 22:25 輸出順序統一為由舊到新（最新在最下方）
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 一般模式最新在上，看到尾端又是舊資料
+
+執行 `.\CodexRunLog.ps1` 時第一筆是最新，往下讀卻越來越舊；要確認「剛剛做了什麼」得回頭看第一筆，和 `-Tail` 的方向相反。
+
+### 根因 - 兩種模式排序方向不一致
+
+一般模式刻意「最新在上」方便快速瀏覽，但 `-Tail` 的起始內容是「由舊到新」（新事件接在下方）。同一支工具兩種方向，造成判讀混亂。
+
+### 修改 - 一律由舊到新
+
+- 一般模式改為依時間升冪輸出，最新永遠在最下方，與 `-Tail` 一致。
+- `Get-Help`、README、Docs 的 `-Limit` 說明同步改為「取最新 N 筆；由舊到新顯示」。
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
+## 2026.10.30 22:25 修正讀檔失敗導致整檔被跳過
+
+**類型**: 修復 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 偶爾只顯示到前一天的舊指令
+
+有時執行後最新只到 10/29，但 `-Diag` 顯示 10/30 的活動檔排第一，兩者對不上。
+
+### 根因 - 讀檔例外時 `catch { continue }` 直接放棄整個檔
+
+`Get-RecentEvents` 原本把整段讀取包在 try/catch，任一檔案開檔失敗（Codex 寫入中短暫鎖檔）或任一行解析出錯，就 `continue` 跳過整個檔；於是排名第一的活動檔被丟掉，往下讀到 83MB 的舊 session，最新時間就退回前一天。`-Diag` 只算行數、不解析，所以看起來正常。
+
+### 修改 - 重試、逐行容錯、失敗要出聲
+
+- 新增 `Read-SharedLinesWithRetry`：開檔失敗重試 4 次（間隔 150ms）。
+- 逐行 `try/catch`：單行壞掉只略過該行，不再丟掉整個檔。
+- 真的讀不到時印出 `⚠ 無法讀取，已跳過：<檔名>`，不再靜默。
+- 新增測試：單行壞掉不丟檔、讀不到回傳空值。
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
+## 2026.10.30 22:01 修正檔案排序、新增執行結果與 -Diag
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 只看到指令、看不到結果；偶爾漏掉最新指令
+
+清單只有命令本身，沒有執行結果；`-Tail` 又偶爾停在舊內容，與 Codex 實際動作對不上。
+
+### 根因 - 用 mtime 排序 + 沒配對 call_id
+
+1. 活動中的 rollout 檔是開著持續寫入的，Windows 的 **mtime 不會即時更新**（實測：檔案 mtime 20:35，最後事件卻是 21:28）。用 mtime 排序並「湊滿 N 筆就停」，若過期的活動檔被排到後面，前面又有檔案湊滿，就會提早停止而漏掉最新指令。
+2. 結果其實就在 rollout：`custom_tool_call_output` / `function_call_output`，以 `call_id` 與呼叫成對（實測主 session 57 calls / 57 outputs）。原本只解析呼叫端。
+
+### 修改 - 依實際事件時間排序、配對輸出、新增診斷
+
+- 新增 `Get-FileLastEventTime`（讀檔尾 64KB 取最後 `timestamp`）與 `Get-RolloutFilesByActivity`，改以「最後事件時間」排序（取不到才退回 mtime）。
+- 新增 `Get-OutputText`／`Format-ExecOutput`／`Get-ToolOutputsFromLine`／`Join-EventsWithOutputs`：把輸出攤平、取出 `exit_code`／`wall_time_seconds`／`output`，再依 `call_id` 掛回指令。
+- `Show-Output`：每筆指令下方顯示結果（exit code、耗時、輸出头尾各 N 行）；`-OutputLines` 調整行數（0 = 全部）、`-NoOutput` 關閉。
+- `-Tail`：同一批到齊的呼叫／輸出直接配對；結果晚到的，之後補印「結果（較早指令）」區塊。
+- 新增 `-Diag`：列出各 rollout 檔的 mtime、大小、最後事件時間、calls/outputs 數，並標示 0 指令的審查執行緒。
+- Get-Help、README、Docs 參數表同步更新；新增 9 個測試（輸出解析／配對／mtime 過期排序）。
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
 ## 2026.10.30 21:44 補齊 Get-Help 註解說明並加上防漂移測試
 
 **類型**: 改進 · **檔案**: `CodexRunLog.ps1`、`tests/CodexRunlog.Tests.ps1`

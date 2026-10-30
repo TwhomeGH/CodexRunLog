@@ -12,6 +12,7 @@ Codex 在對話中常只顯示指令的摘要或截斷片段，長指令（例�
 - **語法上色**：自動判斷 PowerShell / Python / JavaScript / Shell(git) 並上色。
 - **可讀版面**：PowerShell 一行多句會自動斷行縮排；附上 Codex 的中文說明。
 - **持續監看**：`-Tail` 即時追蹤後續新紀錄。
+- **含執行結果**：以 `call_id` 配對輸出，顯示 exit code、耗時與輸出內容（`-NoOutput` 可關）。
 - **跨機可攜**：sessions 目錄自動解析，找不到時提示輸入並記錄到 `CodexRunlog.ini`。
 
 ## 需求
@@ -50,10 +51,13 @@ Codex 在對話中常只顯示指令的摘要或截斷片段，長指令（例�
 
 | 參數 | 預設 | 說明 |
 | --- | --- | --- |
-| `-Limit` | `50` | 起始顯示筆數（由新到舊） |
+| `-Limit` | `50` | 取最新 N 筆；由舊到新顯示（最新在最下方） |
 | `-Tail` | 關 | 印完起始內容後持續監看新紀錄 |
 | `-Interval` | `2` | `-Tail` 的輪詢間隔秒數 |
 | `-SessionsDir` | 自動解析 | rollout JSONL 根目錄 |
+| `-OutputLines` | `8` | 每筆結果顯示的行數（頭尾各 N 行；`0` 為全部） |
+| `-NoOutput` | 關 | 不顯示執行結果 |
+| `-Diag` | 關 | 診斷各 rollout 檔的活動時間與指令數 |
 
 > 上表僅為速查。參數與用法的權威來源是程式內的註解說明（單一來源），可直接執行 `Get-Help .\CodexRunLog.ps1 -Full`（另有 `-Examples`、`-Online`）。修改參數時請一併更新註解說明。
 
