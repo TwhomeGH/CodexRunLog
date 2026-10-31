@@ -1,5 +1,30 @@
 # Codex 運行日誌 — 改動說明
 
+## 2026.10.30 22:38 監看改用 FileSystemWatcher（事件驅動＋安全輪詢）
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 閒置時仍每 2 秒掃描
+
+`-Tail` 不論有沒有活動都固定每 2 秒枚舉檔案、比對大小。Codex 結束或撞到使用上限後，掛著仍持續耗用（雖不大，但沒有必要），也讓人懷疑是不是「卡住了」。
+
+### 根因 - 用輪詢模擬變更通知
+
+輪詢無法知道「有沒有變更」，只能反覆檢查。`.codex` 在本機磁碟，可以直接用 OS 的變更通知。
+
+### 修改 - 事件驅動為主，輪詢為後援
+
+- 以 `FileSystemWatcher`（即 Windows `ReadDirectoryChangesW`）監看 `*.jsonl`；**閒置時完全不掃描**，有寫入才喚醒，並做 250ms 防抖。
+- `WaitForChanged` 的 1 秒 timeout 只為讓 `Ctrl+C` 能及時中斷；每 `-Interval` 秒（預設 60）才做一次**安全檢查**，補抓漏掉的變更（buffer overflow／網路磁碟）。
+- 保留既有的「位元組位移＋半行 carry」，只讀新增內容。
+- 新增 `-PollOnly`（固定輪詢，適合網路磁碟）與 `-Interval` 語意改為安全檢查間隔；無法建立 watcher 時自動退回**自適應輪詢**（2→4→…→上限）。
+- 閒置時印出 `… 閒置，等待變更`，避免誤以為掛掉。
+- 重構 `Read-TailBatch`（可測的增量讀取）與 `Get-SessionWatcher`；新增測試（增量／半行／watcher 設定／即時偵測）。同步更新 Get-Help、README、Docs。
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
 ## 2026.10.30 22:25 輸出順序統一為由舊到新（最新在最下方）
 
 **類型**: 改進 · **檔案**: `CodexRunLog.ps1`

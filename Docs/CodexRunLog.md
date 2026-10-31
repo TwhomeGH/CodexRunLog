@@ -47,11 +47,11 @@
 # 最新 100 筆
 .\CodexRunLog.ps1 -Limit 100
 
-# 持續監看後續新紀錄（每 2 秒輪詢）
+# 持續監看後續新紀錄（檔案變更即時顯示）
 .\CodexRunLog.ps1 -Tail
 
-# 自訂輪詢間隔（秒）
-.\CodexRunLog.ps1 -Tail -Interval 3
+# 不用檔案變更通知，改固定輪詢（每 2 秒）
+.\CodexRunLog.ps1 -Tail -PollOnly -Interval 2
 
 # 指定其他 sessions 目錄（會覆蓋設定檔）
 .\CodexRunLog.ps1 -SessionsDir 'D:\codex\sessions'
@@ -62,8 +62,9 @@
 | 參數 | 型別 | 預設 | 說明 |
 | --- | --- | --- | --- |
 | `-Limit` | int | `50` | 取最新的 N 筆；輸出由舊到新（最新在最下方），與 `-Tail` 一致 |
-| `-Tail` | switch | 關 | 印完起始內容後，輪詢並即時輸出後續新紀錄（由舊到新，最新在最底部） |
-| `-Interval` | int | `2` | `-Tail` 的輪詢間隔秒數 |
+| `-Tail` | switch | 關 | 印完起始內容後持續監看；檔案變更即時輸出（由舊到新，最新在最底部） |
+| `-Interval` | int | `60` | 監看的安全檢查間隔秒數（有變更時即時輸出；此為後援） |
+| `-PollOnly` | switch | 關 | 不用檔案變更通知，改固定輪詢（網路磁碟等環境） |
 | `-SessionsDir` | string | 自動解析 | rollout JSONL 根目錄；省略時依「設定檔 → `%USERPROFILE%\.codex\sessions` → 手動輸入」解析 |
 | `-OutputLines` | int | `8` | 每筆結果最多顯示頭尾各 N 行；`0` 表示全部 |
 | `-NoOutput` | switch | 關 | 不顯示執行結果 |
@@ -76,6 +77,7 @@
 監看模式的排序與除重：
 
 - 起始內容**由舊到新**排列（最新在最底部），後續新事件自然往下接續，維持單一時間軸、不會亂序。
+- 以 `FileSystemWatcher` 即時偵測檔案變更，閒置時不做掃描；每 `-Interval` 秒僅做一次安全檢查。
 - 以「時間下限」過濾：只有比目前最新事件更新者才輸出，避免新出現的 rollout 檔**重播舊內容**。
 
 ### 設定檔 `CodexRunlog.ini`
@@ -136,7 +138,7 @@ sessions = C:\Users\someone\.codex\sessions
    - 其他依 PowerShell cmdlet / `$var` / `#`、`git`、或預設 shell 判定。
 4. **上色**：單次掃描 tokenizer，**字串/註解優先**匹配，避免關鍵字跑進字串、色碼互相污染。
 5. **展開**：僅 PowerShell 會把 `;` `{` `}` 在**字串外**斷行並 4 空格縮排；`for(;;)` 之類用**括號深度**保護不誤斷。
-6. **監看**：`-Tail` 記錄每個檔的**位元組位移**，輪詢時只讀新增部分，保留未完成的尾行；新 session 檔自動納入。輸出的新事件依時間排序並接續在下方，且以「時間下限」略過比目前最新更舊的內容（避免重播）。
+6. **監看**：`-Tail` 以 `FileSystemWatcher`（`ReadDirectoryChangesW`）即時偵測寫入，閒置時不掃描，另有每 `-Interval` 秒的安全檢查（`-PollOnly` 可改固定輪詢）。記錄每個檔的**位元組位移**，只讀新增部分並保留未完成的尾行；新 session 檔自動納入。新事件依時間排序接續在下方，並以「時間下限」略過較舊內容（避免重播）。
 
 ---
 

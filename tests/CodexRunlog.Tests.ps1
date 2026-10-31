@@ -445,3 +445,68 @@ Describe '讀取容錯（不因單行或鎖檔丟掉整個檔）' {
         Read-SharedLinesWithRetry (Join-Path $tmp 'nope.jsonl') | Should -BeNullOrEmpty
     }
 }
+
+Describe '監看：增量讀取與 watcher' {
+    BeforeAll {
+        $script:mTmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-tail-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $script:mTmp | Out-Null
+        $script:mFile = Join-Path $script:mTmp 'rollout-t.jsonl'
+        $call1 = '{"timestamp":"2026-10-30T13:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"CMD1\"})","call_id":"c1"}}'
+        $script:mOut1 = '{"timestamp":"2026-10-30T13:00:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"{\"exit_code\":0,\"output\":\"OK1\"}"}]}}'
+        Set-Content -LiteralPath $script:mFile -Encoding utf8 -Value $call1
+    }
+
+    AfterAll {
+        if (Test-Path -LiteralPath $script:mTmp) { Remove-Item -LiteralPath $script:mTmp -Recurse -Force }
+        Get-Job -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
+    }
+
+    It '增量讀取只回傳新增內容，並正確處理半行' {
+        $offsets = @{}; $carries = @{}
+
+        $b1 = Read-TailBatch $offsets $carries -Root $script:mTmp
+        $b1.Calls.Count | Should -Be 1
+        $b1.Calls[0].Cmd | Should -Be 'CMD1'
+
+        $b2 = Read-TailBatch $offsets $carries -Root $script:mTmp
+        $b2.Calls.Count | Should -Be 0
+
+        Add-Content -LiteralPath $script:mFile -Value $script:mOut1 -Encoding utf8
+        $b3 = Read-TailBatch $offsets $carries -Root $script:mTmp
+        $b3.Outputs.Count | Should -Be 1
+        $b3.Outputs['c1'].Output | Should -Be 'OK1'
+
+        $partial = '{"timestamp":"2026-10-30T13:02:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"CMD2\"})","call_id":"c2"}}'
+        [System.IO.File]::AppendAllText($script:mFile, $partial)
+        $b4 = Read-TailBatch $offsets $carries -Root $script:mTmp
+        $b4.Calls.Count | Should -Be 0   # 半行先保留
+
+        [System.IO.File]::AppendAllText($script:mFile, "`n")
+        $b5 = Read-TailBatch $offsets $carries -Root $script:mTmp
+        $b5.Calls.Count | Should -Be 1
+        $b5.Calls[0].Cmd | Should -Be 'CMD2'
+    }
+
+    It 'Get-SessionWatcher 設定正確' {
+        $w = Get-SessionWatcher $script:mTmp
+        $w | Should -Not -BeNullOrEmpty
+        $w.Filter | Should -Be '*.jsonl'
+        $w.IncludeSubdirectories | Should -BeTrue
+        $w.Dispose()
+    }
+
+    It 'watcher 能即時偵測到寫入' {
+        $w = Get-SessionWatcher $script:mTmp
+        try {
+            $w.EnableRaisingEvents = $true
+            $null = Start-Job -ScriptBlock {
+                Start-Sleep -Milliseconds 800
+                Add-Content -LiteralPath $args[0] -Value ' ' -Encoding utf8
+            } -ArgumentList $script:mFile
+            $res = $w.WaitForChanged([System.IO.WatcherChangeTypes]::All, 8000)
+            $res.TimedOut | Should -BeFalse
+        } finally {
+            $w.Dispose()
+        }
+    }
+}

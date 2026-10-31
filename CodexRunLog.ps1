@@ -25,7 +25,10 @@
     監看模式由舊到新排列（最新在最下方），並略過重播的舊內容。
 
 .PARAMETER Interval
-    -Tail 的輪詢間隔秒數。預設 2。
+    監看模式的安全檢查間隔秒數（有檔案變更時會即時輸出，此值只是後援）。預設 60。
+
+.PARAMETER PollOnly
+    不使用檔案變更通知，改為固定輪詢（適合網路磁碟或不支援 watcher 的環境）。
 
 .PARAMETER SessionsDir
     rollout JSONL 根目錄。省略時依序嘗試：
@@ -76,11 +79,12 @@
 param(
     [int]$Limit = 50,
     [switch]$Tail,
-    [int]$Interval = 2,
+    [int]$Interval = 60,
     [string]$SessionsDir = '',
     [int]$OutputLines = 8,
     [switch]$NoOutput,
-    [switch]$Diag
+    [switch]$Diag,
+    [switch]$PollOnly
 )
 #Requires -Version 7.0
 
@@ -797,6 +801,54 @@ function Select-NewEvents {
     }
 }
 
+# 掃描一次：讀取各檔自 offset 之後的新行，回傳新事件（已依 call_id 配對輸出）
+function Read-TailBatch {
+    param([hashtable]$Offsets, [hashtable]$Carries, [string]$Root = $SessionsDir)
+    $calls = [System.Collections.Generic.List[object]]::new()
+    $outs = @{}
+    foreach ($f in (Get-RolloutFiles -Root $Root)) {
+        $path = $f.FullName
+        if (-not $Offsets.ContainsKey($path)) { $Offsets[$path] = 0L; $Carries[$path] = '' }
+        if ([long]$f.Length -lt $Offsets[$path]) { $Offsets[$path] = 0L; $Carries[$path] = '' }
+        if ([long]$f.Length -le $Offsets[$path]) { continue }
+
+        $r = try { Read-AppendedLines $path $Offsets[$path] $Carries[$path] } catch { $null }
+        if ($null -eq $r) { continue }
+        $Offsets[$path] = $r.Offset
+        $Carries[$path] = $r.Carry
+
+        $cwd = Get-SessionCwd $path
+        foreach ($line in $r.Lines) {
+            try {
+                if (Test-HasCommand $line) {
+                    foreach ($ev in (Get-CommandEventsFromLine $line $path $cwd)) { $calls.Add($ev) }
+                } elseif (Test-HasOutput $line) {
+                    $rec = Get-ToolOutputsFromLine $line
+                    if ($rec) { $outs[$rec.CallId] = $rec }
+                }
+            } catch { Write-Verbose "略過一行（解析失敗）：$($_.Exception.Message)" }
+        }
+    }
+    [void](Join-EventsWithOutputs $calls $outs)
+    return [pscustomobject]@{ Calls = $calls; Outputs = $outs }
+}
+
+# 建立檔案變更監看器（FileSystemWatcher 即 ReadDirectoryChangesW）；失敗回傳 $null
+function Get-SessionWatcher {
+    param([string]$Root)
+    try {
+        $w = [System.IO.FileSystemWatcher]::new($Root, '*.jsonl')
+        $w.IncludeSubdirectories = $true
+        $w.NotifyFilter = [System.IO.NotifyFilters]::LastWrite -bor [System.IO.NotifyFilters]::Size -bor
+                          [System.IO.NotifyFilters]::CreationTime -bor [System.IO.NotifyFilters]::FileName
+        $w.InternalBufferSize = 65536
+        return $w
+    } catch {
+        Write-Verbose "無法建立 FileSystemWatcher：$($_.Exception.Message)"
+        return $null
+    }
+}
+
 # 被 dot-source 時（例如單元測試載入函式）不執行主流程
 # 診斷：列出各 rollout 檔的活動時間與指令／結果數量
 function Show-Diagnostics {
@@ -857,65 +909,78 @@ foreach ($f in (Get-RolloutFiles)) {
     $carries[$f.FullName] = ''
 }
 
-Write-Host (Color '90' "── 監看中（每 $Interval 秒輪詢；新事件接續於下方，Ctrl+C 結束）──")
 $pending = @{}
-while ($true) {
-    Start-Sleep -Seconds $Interval
+$safetySeconds = [Math]::Max(5, $Interval)
+$pollCap = [Math]::Max(1, $Interval)
+$watcher = if ($PollOnly) { $null } else { Get-SessionWatcher $SessionsDir }
 
-    $calls = [System.Collections.Generic.List[object]]::new()
-    $outs = @{}
-    foreach ($f in (Get-RolloutFiles)) {
-        $path = $f.FullName
-        if (-not $offsets.ContainsKey($path)) {
-            $offsets[$path] = 0L
-            $carries[$path] = ''
-        }
-        if ([long]$f.Length -lt $offsets[$path]) {
-            $offsets[$path] = 0L
-            $carries[$path] = ''
-        }
-        if ([long]$f.Length -le $offsets[$path]) { continue }
+if ($null -ne $watcher) {
+    Write-Host (Color '90' "── 監看中（檔案變更即時通知；每 $safetySeconds 秒安全檢查；Ctrl+C 結束）──")
+} else {
+    if (-not $PollOnly) { Write-Host (Color '93' '（無法使用檔案變更通知，改用輪詢）') }
+    Write-Host (Color '90' '── 監看中（輪詢；Ctrl+C 結束）──')
+}
 
-        $r = try { Read-AppendedLines $path $offsets[$path] $carries[$path] } catch { $null }
-        if ($null -eq $r) { continue }
-        $offsets[$path] = $r.Offset
-        $carries[$path] = $r.Carry
+$idleShown = $false
+$ticks = 0
+$pollSeconds = [Math]::Min(2, $pollCap)
 
-        $cwd = Get-SessionCwd $path
-        foreach ($line in $r.Lines) {
-            if (Test-HasCommand $line) {
-                foreach ($ev in (Get-CommandEventsFromLine $line $path $cwd)) { $calls.Add($ev) }
-            } elseif (Test-HasOutput $line) {
-                $rec = Get-ToolOutputsFromLine $line
-                if ($rec) { $outs[$rec.CallId] = $rec }
+try {
+    while ($true) {
+        if ($null -ne $watcher) {
+            # 1 秒 timeout 只為了讓 Ctrl+C 能及時中斷；真正的喚醒來自檔案變更事件
+            $res = $watcher.WaitForChanged([System.IO.WatcherChangeTypes]::All, 1000)
+            $timedOut = $res.TimedOut
+            if ($timedOut) {
+                $ticks++
+                if ($ticks -lt $safetySeconds) { continue }   # 閒置：完全不掃描
+                $ticks = 0
+            } else {
+                $ticks = 0
+                Start-Sleep -Milliseconds 250                 # 防抖：等同一批寫入落定
             }
+        } else {
+            Start-Sleep -Seconds $pollSeconds
+            $timedOut = $true
+        }
+
+        $batch = Read-TailBatch $offsets $carries
+        $newCalls = @(Select-NewEvents $batch.Calls $floor | Sort-Object Time)
+        $hasNew = ($newCalls.Count -gt 0) -or ($batch.Outputs.Count -gt 0)
+
+        if ($hasNew) {
+            $idleShown = $false
+            if ($null -eq $watcher) { $pollSeconds = [Math]::Min(2, $pollCap) }
+
+            foreach ($e in $newCalls) {
+                if (-not $e.Output -and $e.CallId) { $pending[$e.CallId] = $e }
+                Show-Event $e
+            }
+
+            # 先前已輸出、結果晚到的指令：補印結果
+            foreach ($id in @($batch.Outputs.Keys)) {
+                if (-not $pending.ContainsKey($id)) { continue }
+                $ev = $pending[$id]
+                if ($ev.Output) { $pending.Remove($id); continue }
+                $o = $batch.Outputs[$id]
+                $ev | Add-Member -NotePropertyName Output   -NotePropertyValue $o.Output   -Force
+                $ev | Add-Member -NotePropertyName ExitCode -NotePropertyValue $o.ExitCode -Force
+                $ev | Add-Member -NotePropertyName WallTime -NotePropertyValue $o.WallTime -Force
+                Write-Host (Color '90' ('─' * 78))
+                Write-Host ((Color '90' '結果（較早指令）') + '  ' + (Color '90' $ev.Time.ToString('yyyy/MM/dd HH:mm:ss')))
+                Show-Output $ev
+                Write-Host ''
+                $pending.Remove($id)
+            }
+
+            $floor = Get-MaxEventTime @($newCalls) $floor
+            foreach ($o in @($batch.Outputs.Values)) { if ($o.Time -and $o.Time -gt $floor) { $floor = $o.Time } }
+        } elseif ($timedOut -and -not $idleShown) {
+            Write-Host (Color '90' '… 閒置，等待變更（Ctrl+C 結束）')
+            $idleShown = $true
+            if ($null -eq $watcher) { $pollSeconds = [Math]::Min($pollCap, [Math]::Max(2, $pollSeconds * 2)) }
         }
     }
-
-    [void](Join-EventsWithOutputs $calls $outs)
-
-    $newCalls = @(Select-NewEvents $calls $floor | Sort-Object Time)
-    foreach ($e in $newCalls) {
-        if (-not $e.Output -and $e.CallId) { $pending[$e.CallId] = $e }
-        Show-Event $e
-    }
-
-    # 先前已輸出、結果晚到的指令：補印結果
-    foreach ($id in @($outs.Keys)) {
-        if (-not $pending.ContainsKey($id)) { continue }
-        $ev = $pending[$id]
-        if ($ev.Output) { $pending.Remove($id); continue }
-        $o = $outs[$id]
-        $ev | Add-Member -NotePropertyName Output   -NotePropertyValue $o.Output   -Force
-        $ev | Add-Member -NotePropertyName ExitCode -NotePropertyValue $o.ExitCode -Force
-        $ev | Add-Member -NotePropertyName WallTime -NotePropertyValue $o.WallTime -Force
-        Write-Host (Color '90' ('─' * 78))
-        Write-Host ((Color '90' '結果（較早指令）') + '  ' + (Color '90' $ev.Time.ToString('yyyy/MM/dd HH:mm:ss')))
-        Show-Output $ev
-        Write-Host ''
-        $pending.Remove($id)
-    }
-
-    $floor = Get-MaxEventTime @($newCalls) $floor
-    foreach ($o in @($outs.Values)) { if ($o.Time -and $o.Time -gt $floor) { $floor = $o.Time } }
+} finally {
+    if ($null -ne $watcher) { $watcher.Dispose() }
 }
