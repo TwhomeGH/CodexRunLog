@@ -21,7 +21,8 @@ Import-Module PSScriptAnalyzer -ErrorAction Stop
 $settings = Join-Path $root 'PSScriptAnalyzerSettings.psd1'
 $targets = @(
     (Join-Path $root 'CodexRunLog.ps1'),
-    (Join-Path $root 'tests/CodexRunlog.Tests.ps1')
+    (Join-Path $root 'tests/CodexRunlog.Tests.ps1'),
+    (Join-Path $root 'hooks/Install-Hook.ps1')
 )
 $issues = @(foreach ($t in $targets) { Invoke-ScriptAnalyzer -Path $t -Settings $settings })
 if ($issues.Count -gt 0) {

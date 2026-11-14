@@ -15,10 +15,14 @@
     相較 SQLite 的 feedback_log_body（會被 Codex 截斷），rollout 是完整指令。
     每筆指令會以 call_id 配對其執行結果（custom_tool_call_output / function_call_output）。
 
+    除了指令，也會解析 event_msg/item_completed，顯示檔案變更（FileChange）、
+    MCP 呼叫（McpToolCall）與 Web 搜尋（Extension/web.search），讓時間軸不只
+    有已執行的指令；可用 -NoActivity 關閉。
+
     注意：本工具目前僅支援 Windows + PowerShell 7。
 
 .PARAMETER Limit
-    取最新的 N 筆指令。輸出由舊到新（最新在最下方）。預設 50。
+    取最新的 N 筆事件（指令、檔案變更、MCP 呼叫、Web 搜尋）。輸出由舊到新（最新在最下方）。預設 50。
 
 .PARAMETER Tail
     持續監看：印完起始內容後，輪詢各 rollout 檔新增的行並即時輸出。
@@ -41,9 +45,17 @@
 .PARAMETER NoOutput
     不顯示指令的執行結果，只列指令本身。
 
+.PARAMETER NoActivity
+    只顯示指令；略過檔案變更、MCP 呼叫與 Web 搜尋事件。
+
+.PARAMETER Messages
+    額外顯示 AgentMessage（Codex 對使用者的文字回覆，含 commentary／final_answer）。
+    Reasoning 在 rollout 裡沒有內容（summary_text 與 raw_content 皆為空），因此不提供。
+
 .PARAMETER Diag
     診斷模式：列出各 rollout 檔的最後事件時間、mtime、大小與指令／結果數量，
-    用來確認「資料在哪、為何沒抓到最新指令」，不輸出一般清單。
+    以及 本機（rollout 以外）的會話活動時間；用來確認「資料在哪、
+    為何沒抓到最新指令」，不輸出一般清單。
 
 .EXAMPLE
     顯示最新 50 筆指令。
@@ -83,6 +95,8 @@ param(
     [string]$SessionsDir = '',
     [int]$OutputLines = 8,
     [switch]$NoOutput,
+    [switch]$NoActivity,
+    [switch]$Messages,
     [switch]$Diag,
     [switch]$PollOnly
 )
@@ -97,8 +111,10 @@ $ConfigPath = Join-Path $PSScriptRoot 'CodexRunlog.ini'
 
 # 顯示選項集中一處（供 Show-Output 使用），也讓參數在頂層被明確引用
 $script:Options = [pscustomobject]@{
-    OutputLines = [int]$OutputLines
-    ShowOutput  = -not $NoOutput
+    OutputLines  = [int]$OutputLines
+    ShowOutput   = -not $NoOutput
+    ShowActivity = -not $NoActivity
+    ShowMessages = [bool]$Messages
 }
 
 function Color {
@@ -462,9 +478,9 @@ function Test-HasOutput {
            (($Line.IndexOf('custom_tool_call_output') -ge 0) -or ($Line.IndexOf('function_call_output') -ge 0))
 }
 
-function Test-HasRelevant {
+function Test-HasActivity {
     param([string]$Line)
-    return (Test-HasCommand $Line) -or ($Line.IndexOf('FileChange') -ge 0)
+    return $Line.IndexOf('"item_completed"') -ge 0
 }
 
 # 讀檔尾一小段取最後一個 timestamp；活動中的檔案 mtime 可能不會即時更新
@@ -566,6 +582,103 @@ function Join-EventsWithOutputs {
     return $Calls
 }
 
+# ── 非指令事件（item_completed：檔案變更／MCP／Web 搜尋）──────────────
+# 同一份 rollout 除 exec 外還會有 item_completed；這裡把它變成「事件」，
+# 讓時間軸不只顯示已執行的指令。
+
+# 統計 unified diff 的新增／刪除行數（不計 +++/--- 檔頭）
+function Measure-DiffLines {
+    param([string]$Diff)
+    $added = 0; $removed = 0
+    if ($Diff) {
+        foreach ($line in ($Diff -split "`n")) {
+            $l = $line.TrimEnd("`r")
+            if ($l.StartsWith('+') -and -not $l.StartsWith('+++')) { $added++ }
+            elseif ($l.StartsWith('-') -and -not $l.StartsWith('---')) { $removed++ }
+        }
+    }
+    return [pscustomobject]@{ Added = $added; Removed = $removed }
+}
+
+# 解析 event_msg/item_completed → 檔案變更／MCP 呼叫／Web 搜尋事件
+function Get-ActivityEventsFromLine {
+    param([string]$Line, [string]$Path, [string]$Cwd, [switch]$IncludeMessages)
+    if (-not (Test-HasActivity $Line)) { return @() }
+    $o = $null
+    try { $o = $Line | ConvertFrom-Json } catch { return @() }
+    $item = $o.payload.item
+    if ($null -eq $item) { return @() }
+
+    $time = $null
+    if ($o.timestamp) {
+        try {
+            $dt = [datetime]$o.timestamp
+            $time = ([DateTimeOffset]$dt).ToLocalTime()
+        } catch { Write-Verbose "無法解析 timestamp：$($_.Exception.Message)" }
+    }
+
+    switch ([string]$item.type) {
+        'FileChange' {
+            $changes = [System.Collections.Generic.List[object]]::new()
+            foreach ($prop in $item.changes.PSObject.Properties) {
+                $c = $prop.Value
+                $d = Measure-DiffLines ([string]$c.unified_diff)
+                $changes.Add([pscustomobject]@{
+                    Path    = $prop.Name
+                    Change  = [string]$c.type
+                    Added   = $d.Added
+                    Removed = $d.Removed
+                })
+            }
+            return @([pscustomobject]@{ Kind = 'file'; Time = $time; Path = $Path; Workdir = $Cwd; Changes = $changes.ToArray() })
+        }
+        'McpToolCall' {
+            return @([pscustomobject]@{
+                Kind      = 'mcp'
+                Time      = $time
+                Path      = $Path
+                Workdir   = $Cwd
+                Server    = [string]$item.server
+                Tool      = [string]$item.tool
+                Arguments = $item.arguments
+                Status    = [string]$item.status
+            })
+        }
+        'Extension' {
+            $kind = [string]$item.kind
+            if ($kind -eq 'web.search') {
+                $queries = @()
+                if ($item.action -and $item.action.queries) { $queries = @($item.action.queries) }
+                if ($queries.Count -eq 0 -and $item.query) { $queries = @([string]$item.query) }
+                $resultCount = if ($null -eq $item.results) { 0 } else { @($item.results).Count }
+                return @([pscustomobject]@{
+                    Kind        = 'search'
+                    Time        = $time
+                    Path        = $Path
+                    Workdir     = $Cwd
+                    Query       = ($queries -join ' | ')
+                    Queries     = $queries
+                    ResultCount = $resultCount
+                })
+            }
+            return @([pscustomobject]@{ Kind = 'extension'; Time = $time; Path = $Path; Workdir = $Cwd; ExtensionKind = $kind })
+        }
+        'AgentMessage' {
+            if (-not $IncludeMessages) { return @() }
+            $text = (@($item.content) | ForEach-Object { if ($_.text) { [string]$_.text } }) -join "`n"
+            return @([pscustomobject]@{
+                Kind    = 'agent'
+                Time    = $time
+                Path    = $Path
+                Workdir = $Cwd
+                Text    = $text.TrimEnd()
+                Phase   = [string]$item.phase
+            })
+        }
+        default { return @() }
+    }
+}
+
 $script:WorkdirCache = @{}
 
 # 以共用模式開檔（ReadWrite/Delete），避免與 Codex 正在寫入的 rollout 檔互鎖
@@ -632,9 +745,119 @@ function Read-SharedLinesWithRetry {
     return $null
 }
 
+# ── Hook 事件（Codex hooks → runlog\events.jsonl）───────────────────
+# 由 hooks\Install-Hook.ps1 安裝；提供 rollout 沒有的會話（例如非專案對話）。
+# 已有 transcript（rollout）的會話仍以 rollout 為準，避免重複且保留 exit code／耗時。
+
+function Get-HookLogPath {
+    param([string]$SessionsRoot = $SessionsDir)
+    $base = Split-Path -Parent $SessionsRoot
+    if (-not $base) { $base = $SessionsRoot }
+    return (Join-Path $base 'runlog\events.jsonl')
+}
+
+# apply_patch 的 patch 文字 → 每個檔案的新增／修改／刪除
+function ConvertFrom-PatchText {
+    param([string]$Patch)
+    $changes = [System.Collections.Generic.List[object]]::new()
+    if (-not $Patch) { return $changes.ToArray() }
+    $cur = $null; $added = 0; $removed = 0
+    foreach ($line in ($Patch -split "`n")) {
+        $l = $line.TrimEnd("`r")
+        if ($l -match '^\*\*\* (Add|Update|Delete) File: (.+)$') {
+            if ($cur) {
+                $changes.Add([pscustomobject]@{ Path = $cur.Path; Change = $cur.Change; Added = $added; Removed = $removed })
+            }
+            $cur = [pscustomobject]@{ Path = $Matches[2]; Change = $Matches[1].ToLowerInvariant() }
+            $added = 0; $removed = 0
+            continue
+        }
+        if (-not $cur) { continue }
+        if ($l.StartsWith('+') -and -not $l.StartsWith('+++')) { $added++ }
+        elseif ($l.StartsWith('-') -and -not $l.StartsWith('---')) { $removed++ }
+    }
+    if ($cur) {
+        $changes.Add([pscustomobject]@{ Path = $cur.Path; Change = $cur.Change; Added = $added; Removed = $removed })
+    }
+    return $changes.ToArray()
+}
+
+# 單一 hook 事件 → 時間軸事件；不支援的事件回傳 $null
+function ConvertFrom-HookEvent {
+    param($Item)
+    if ([string]$Item.hook_event_name -ne 'PostToolUse') { return $null }
+
+    $time = $null
+    if ($Item.logged_at) {
+        try {
+            if ($Item.logged_at -is [datetime]) {
+                # ConvertFrom-Json 會把 ISO 字串轉成 DateTime；直接轉 DateTimeOffset 才保留 UTC
+                $time = ([DateTimeOffset]([datetime]$Item.logged_at)).ToLocalTime()
+            } else {
+                $time = ([DateTimeOffset]::Parse([string]$Item.logged_at)).ToLocalTime()
+            }
+        } catch { Write-Verbose "logged_at 解析失敗：$($_.Exception.Message)" }
+    }
+    if ($null -eq $time) { return $null }
+
+    $tool = [string]$Item.tool_name
+    $cwd = [string]$Item.cwd
+
+    if ($tool -eq 'Bash') {
+        $cmd = ''
+        if ($Item.tool_input -and $Item.tool_input.command) { $cmd = [string]$Item.tool_input.command }
+        if (-not $cmd) { return $null }
+        $output = if ($null -ne $Item.tool_response) { Get-OutputText $Item.tool_response } else { $null }
+        return [pscustomobject]@{
+            Kind = 'command'; Time = $time; Cmd = $cmd; Workdir = $cwd
+            Output = $output; CallId = [string]$Item.tool_use_id; Source = 'hook'
+        }
+    }
+
+    if ($tool -eq 'apply_patch') {
+        $patch = ''
+        if ($Item.tool_input -and $Item.tool_input.command) { $patch = [string]$Item.tool_input.command }
+        $changes = ConvertFrom-PatchText $patch
+        if (@($changes).Count -eq 0) { return $null }
+        return [pscustomobject]@{ Kind = 'file'; Time = $time; Workdir = $cwd; Changes = $changes; Source = 'hook' }
+    }
+
+    if ($tool -like 'mcp__*') {
+        $rest = $tool.Substring(5)
+        $idx = $rest.IndexOf('__')
+        $server = if ($idx -gt 0) { $rest.Substring(0, $idx) } else { '' }
+        $toolName = if ($idx -gt 0) { $rest.Substring($idx + 2) } else { $rest }
+        return [pscustomobject]@{
+            Kind = 'mcp'; Time = $time; Workdir = $cwd
+            Server = $server; Tool = $toolName; Arguments = $Item.tool_input; Status = 'completed'; Source = 'hook'
+        }
+    }
+
+    if (-not $tool) { return $null }
+    return [pscustomobject]@{ Kind = 'extension'; Time = $time; Workdir = $cwd; ExtensionKind = $tool; Source = 'hook' }
+}
+
+# 讀取 hook 事件；transcript 存在的會話交給 rollout（不重複輸出）
+function Get-HookEvents {
+    param([string]$Path = (Get-HookLogPath $SessionsDir))
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $out = [System.Collections.Generic.List[object]]::new()
+    try {
+        foreach ($line in (Read-SharedLines $Path)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try { $o = $line | ConvertFrom-Json } catch { continue }
+            $tp = [string]$o.transcript_path
+            if ($tp -and (Test-Path -LiteralPath $tp)) { continue }
+            $ev = ConvertFrom-HookEvent $o
+            if ($ev) { $out.Add($ev) }
+        }
+    } catch { Write-Verbose "hook 事件讀取失敗：$($_.Exception.Message)" }
+    return $out.ToArray()
+}
+
 function Get-RecentEvents {
     param([int]$Need, [string]$Root = $SessionsDir)
-    $calls = [System.Collections.Generic.List[object]]::new()
+    $events = [System.Collections.Generic.List[object]]::new()
     $outputs = @{}
     foreach ($f in (Get-RolloutFilesByActivity -Root $Root)) {
         $cwd = Get-SessionCwd $f.FullName
@@ -648,25 +871,52 @@ function Get-RecentEvents {
         foreach ($line in $lines) {
             try {
                 if (Test-HasCommand $line) {
-                    foreach ($ev in (Get-CommandEventsFromLine $line $f.FullName $cwd)) { $calls.Add($ev) }
+                    foreach ($ev in (Get-CommandEventsFromLine $line $f.FullName $cwd)) { $events.Add($ev) }
                 } elseif (Test-HasOutput $line) {
                     $rec = Get-ToolOutputsFromLine $line
                     if ($rec) { $outputs[$rec.CallId] = $rec }
+                } elseif ($script:Options.ShowActivity -and (Test-HasActivity $line)) {
+                    foreach ($ev in (Get-ActivityEventsFromLine $line $f.FullName $cwd -IncludeMessages:$script:Options.ShowMessages)) { $events.Add($ev) }
                 }
             } catch { Write-Verbose "略過一行（解析失敗）：$($_.Exception.Message)" }
         }
-        if ($calls.Count -ge $Need) { break }
+        if ($events.Count -ge $Need) { break }
     }
-    [void](Join-EventsWithOutputs $calls $outputs)
-    return @($calls | Sort-Object Time -Descending | Select-Object -First $Need)
+    [void](Join-EventsWithOutputs $events $outputs)
+
+    # hook 事件：只補 rollout 沒有的會話（-NoActivity 時只保留指令）
+    foreach ($h in (Get-HookEvents -Path (Get-HookLogPath $Root))) {
+        if (-not $script:Options.ShowActivity -and $h.Kind -ne 'command') { continue }
+        $events.Add($h)
+    }
+
+    return @($events | Sort-Object Time -Descending | Select-Object -First $Need)
 }
 
 # ── 輸出 ─────────────────────────────────────────────────────────────
+# 輸出多行文字；超過 OutputLines 時顯示頭尾
+function Write-TextBlock {
+    param([string]$Text, [string]$Code = '90')
+    $MaxLines = $script:Options.OutputLines
+    $arr = @($Text -split "`r?`n")
+    while ($arr.Count -gt 0 -and $arr[-1] -eq '') {
+        if ($arr.Count -eq 1) { $arr = @(); break }
+        $arr = @($arr[0..($arr.Count - 2)])
+    }
+    $total = $arr.Count
+    if ($MaxLines -le 0 -or $total -le 2 * $MaxLines) {
+        foreach ($line in $arr) { Write-Host ('  ' + (Color $Code $line)) }
+    } else {
+        foreach ($line in $arr[0..($MaxLines - 1)]) { Write-Host ('  ' + (Color $Code $line)) }
+        Write-Host ('  ' + (Color '90' "…（省略 $($total - 2 * $MaxLines) 行）"))
+        foreach ($line in $arr[($total - $MaxLines)..($total - 1)]) { Write-Host ('  ' + (Color $Code $line)) }
+    }
+}
+
 function Show-Output {
     param($e)
     if (-not $script:Options.ShowOutput) { return }
     if (-not $e.Output) { return }
-    $MaxLines = $script:Options.OutputLines
 
     $meta = @()
     if ($null -ne $e.ExitCode) { $meta += "exit=$($e.ExitCode)" }
@@ -674,24 +924,12 @@ function Show-Output {
     $label = '結果'
     if ($meta.Count -gt 0) { $label += '（' + ($meta -join ' · ') + '）' }
     Write-Host ('  ' + (Color '90' '↳ ') + (Color '36' $label))
-
-    $arr = @($e.Output -split "`r?`n")
-    while ($arr.Count -gt 0 -and $arr[-1] -eq '') {
-        if ($arr.Count -eq 1) { $arr = @(); break }
-        $arr = @($arr[0..($arr.Count - 2)])
-    }
-    $total = $arr.Count
-    if ($MaxLines -le 0 -or $total -le 2 * $MaxLines) {
-        foreach ($line in $arr) { Write-Host ('  ' + (Color '90' $line)) }
-    } else {
-        foreach ($line in $arr[0..($MaxLines - 1)]) { Write-Host ('  ' + (Color '90' $line)) }
-        Write-Host ('  ' + (Color '90' "…（省略 $($total - 2 * $MaxLines) 行）"))
-        foreach ($line in $arr[($total - $MaxLines)..($total - 1)]) { Write-Host ('  ' + (Color '90' $line)) }
-    }
+    Write-TextBlock $e.Output '90'
 }
 
 function Show-Event {
     param($e)
+    if ($e.Kind -and $e.Kind -ne 'command') { Show-ActivityEvent $e; return }
     $lang  = Get-CodeLanguage $e.Cmd
     $label = switch ($lang) {
         'python'     { 'Python' }
@@ -719,6 +957,61 @@ function Show-Event {
         Write-Host ('  ' + (Color '90' '↳ ') + (Color '93' $e.Justification))
     }
     if ($e.Output) { Show-Output $e }
+    Write-Host ''
+}
+
+# 非指令事件（檔案變更／MCP／Web 搜尋）的輸出
+function Show-ActivityEvent {
+    param($e)
+    $ts = if ($e.Time) { $e.Time.ToString('yyyy/MM/dd HH:mm:ss') } else { '----/--/-- --:--:--' }
+    $place = ''
+    if ($e.Workdir) { $place = Split-Path $e.Workdir -Leaf }
+
+    Write-Host (Color '90' ('─' * 78))
+    Write-Host ((Color '97' $ts) + '  ' + (Color '90' $place))
+
+    switch ($e.Kind) {
+        'file' {
+            Write-Host ('  ' + (Color '36' '[檔案變更]'))
+            foreach ($c in $e.Changes) {
+                $verb = switch ($c.Change) {
+                    'create' { '新增' }
+                    'add'    { '新增' }
+                    'update' { '修改' }
+                    'delete' { '刪除' }
+                    'rename' { '重新命名' }
+                    default  { $c.Change }
+                }
+                $delta = ''
+                if ($c.Added -or $c.Removed) { $delta = "  +$($c.Added) -$($c.Removed)" }
+                Write-Host ('  ' + (Color '97' $verb) + '  ' + $c.Path + (Color '90' $delta))
+            }
+        }
+        'mcp' {
+            Write-Host ('  ' + (Color '36' '[MCP]') + '  ' + $e.Server + '.' + $e.Tool)
+            if ($null -ne $e.Arguments) {
+                $argsText = try { $e.Arguments | ConvertTo-Json -Depth 5 -Compress } catch { '' }
+                if ($argsText.Length -gt 160) { $argsText = $argsText.Substring(0, 160) + '…' }
+                if ($argsText) { Write-Host ('  ' + (Color '90' $argsText)) }
+            }
+        }
+        'search' {
+            $n = @($e.Queries).Count
+            Write-Host ('  ' + (Color '36' '[Web 搜尋]') + "  $n 個查詢，$($e.ResultCount) 筆結果")
+            $q = [string]$e.Query
+            if ($q.Length -gt 120) { $q = $q.Substring(0, 120) + '…' }
+            if ($q) { Write-Host ('  ' + (Color '90' $q)) }
+        }
+        'agent' {
+            $label = '[Agent]'
+            if ($e.Phase) { $label += "  $($e.Phase)" }
+            Write-Host ('  ' + (Color '36' $label))
+            Write-TextBlock $e.Text '97'
+        }
+        default {
+            Write-Host ('  ' + (Color '36' "[$($e.ExtensionKind)]"))
+        }
+    }
     Write-Host ''
 }
 
@@ -793,6 +1086,17 @@ function Get-MaxEventTime {
     return $max
 }
 
+# 所有 rollout 檔的最新事件時間（包含 session_meta／compaction 等非顯示行）
+function Get-MaxRolloutEventTime {
+    param([string]$Root = $SessionsDir)
+    $max = $null
+    foreach ($f in (Get-RolloutFiles -Root $Root)) {
+        $t = Get-FileLastEventTime $f.FullName
+        if ($null -ne $t -and ($null -eq $max -or $t -gt $max)) { $max = $t }
+    }
+    return $max
+}
+
 # 只保留比 Floor 新（或時間未知）的事件，避免新的 rollout 檔重播舊內容。
 function Select-NewEvents {
     param($Events, [DateTimeOffset]$Floor)
@@ -801,10 +1105,234 @@ function Select-NewEvents {
     }
 }
 
+# ── 本機會話活動（rollout 以外的覆蓋率檢查）────────────────────────
+# 有些本機會話不會落地成 rollout-*.jsonl（例如非專案對話 Documents\Codex）。
+# 這裡只用本機的索引與資料夾判斷「有沒有比清單更新的會話」，
+# 避免把舊清單誤當成最新；會話內容仍以 rollout 為準。
+
+# 找 sqlite3.exe（PATH → WinGet platform-tools），找不到回傳空字串（只找一次）
+function Find-Sqlite3 {
+    if ($null -ne $script:Sqlite3Path) { return $script:Sqlite3Path }
+    $script:Sqlite3Path = ''
+
+    $cmd = Get-Command sqlite3 -CommandType Application -ErrorAction SilentlyContinue
+    if ($cmd) { $script:Sqlite3Path = $cmd.Source; return $script:Sqlite3Path }
+
+    $packages = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    if (Test-Path -LiteralPath $packages) {
+        try {
+            $hit = Get-ChildItem -LiteralPath $packages -Directory -Filter 'Google.PlatformTools*' -ErrorAction SilentlyContinue |
+                ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -Depth 3 -Filter 'sqlite3.exe' -File -ErrorAction SilentlyContinue } |
+                Select-Object -First 1
+            if ($hit) { $script:Sqlite3Path = $hit.FullName }
+        } catch { Write-Verbose "尋找 sqlite3.exe 失敗：$($_.Exception.Message)" }
+    }
+    return $script:Sqlite3Path
+}
+
+# 取 App 目錄下版本編號最大的資料庫（state_*.sqlite / logs_*.sqlite / thread_history_*.sqlite）
+function Get-AppDbFile {
+    param([string]$Dir, [string]$Pattern)
+    $files = @(Get-ChildItem -LiteralPath $Dir -Filter $Pattern -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '_(\d+)\.sqlite$' })
+    if ($files.Count -eq 0) { return $null }
+    return ($files | Sort-Object { [int]([regex]::Match($_.Name, '_(\d+)\.sqlite$').Groups[1].Value) } | Select-Object -Last 1)
+}
+
+# 執行單一純量查詢（多欄以 | 分隔）；任何失敗都回傳 $null，不影響主流程
+function Invoke-SqliteScalar {
+    param([string]$Path, [string]$Query)
+    $exe = Find-Sqlite3
+    if (-not $exe -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $out = & $exe -readonly -batch -noheader -cmd '.timeout 2000' $Path $Query 2>$null
+        if ($LASTEXITCODE -ne 0 -or $null -eq $out) { return $null }
+        return ([string](@($out) | Select-Object -Last 1)).Trim()
+    } catch {
+        Write-Verbose "sqlite 查詢失敗（$Path）：$($_.Exception.Message)"
+        return $null
+    }
+}
+
+# UTC epoch（秒或毫秒）轉本地時間；0 視為沒有資料
+function ConvertFrom-UtcEpoch {
+    param([long]$Value, [string]$Unit = 's')
+    if ($Value -le 0) { return $null }
+    if ($Unit -eq 'ms') { return [DateTimeOffset]::FromUnixTimeMilliseconds($Value).ToLocalTime() }
+    return [DateTimeOffset]::FromUnixTimeSeconds($Value).ToLocalTime()
+}
+
+# 找非專案對話資料夾（預設 Documents\Codex；Documents 可能被 OneDrive 重導向）
+function Resolve-NonProjectRoot {
+    $cands = @(
+        (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Codex'),
+        (Join-Path $env:USERPROFILE 'Documents\Codex'),
+        (Join-Path $env:USERPROFILE 'OneDrive\文件\Codex'),
+        (Join-Path $env:USERPROFILE 'OneDrive\Documents\Codex')
+    )
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    return ''
+}
+
+# 非專案對話（Documents\Codex\<日期>\<對話>）的最新活動時間
+# 這些對話不一定會寫成 rollout，也不是每個都會進 threads 索引。
+function Get-NonProjectChatActivity {
+    param([string]$Root)
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $null }
+    try {
+        $chatDirs = @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue })
+        if ($chatDirs.Count -eq 0) { return $null }
+        $max = $null
+        foreach ($d in $chatDirs) {
+            $t = $d.LastWriteTime
+            foreach ($item in (Get-ChildItem -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue)) {
+                if ($item.LastWriteTime -gt $t) { $t = $item.LastWriteTime }
+            }
+            if ($null -eq $max -or $t -gt $max) { $max = $t }
+        }
+        return [pscustomobject]@{ Time = [DateTimeOffset]$max; Count = $chatDirs.Count }
+    } catch {
+        Write-Verbose "讀取非專案對話資料夾失敗：$($_.Exception.Message)"
+        return $null
+    }
+}
+
+# 回傳 本機（rollout 以外）最新會話時間與各訊號；全部失敗時 Latest 為 $null
+function Get-AppSessionActivity {
+    param([string]$SessionsRoot = $SessionsDir, [string]$NonProjectRoot = (Resolve-NonProjectRoot))
+
+    $codexHome = Split-Path -Parent $SessionsRoot
+    if (-not $codexHome) { $codexHome = $SessionsRoot }
+    $signals = [System.Collections.Generic.List[object]]::new()
+    $notes = [System.Collections.Generic.List[string]]::new()
+    $exe = Find-Sqlite3
+
+    # 1) session_index.jsonl：App 寫的會話索引（不需 sqlite3）
+    $indexPath = Join-Path $codexHome 'session_index.jsonl'
+    if (Test-Path -LiteralPath $indexPath) {
+        try {
+            $max = $null; $count = 0
+            foreach ($line in [System.IO.File]::ReadAllLines($indexPath)) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $m = [regex]::Match($line, '"updated_at"\s*:\s*"([^"]+)"')
+                if (-not $m.Success) { continue }
+                # Guardian review 是內部審查執行緒，不算使用者的會話
+                $mn = [regex]::Match($line, '"thread_name"\s*:\s*"([^"]*)"')
+                if ($mn.Success -and $mn.Groups[1].Value -match '(?i)guardian') { continue }
+                $t = [DateTimeOffset]::Parse($m.Groups[1].Value).ToLocalTime()
+                if ($null -eq $max -or $t -gt $max) { $max = $t }
+                $count++
+            }
+            if ($null -ne $max) {
+                $signals.Add([pscustomobject]@{ Source = 'session_index.jsonl'; Kind = 'session'; Time = $max; Detail = "$count 筆會話索引" })
+            }
+        } catch { $notes.Add("session_index.jsonl 讀取失敗：$($_.Exception.Message)") }
+    }
+
+    # 2) 非專案對話：Documents\Codex 的日期／對話資料夾
+    $nonProject = Get-NonProjectChatActivity -Root $NonProjectRoot
+    if ($nonProject) {
+        $signals.Add([pscustomobject]@{
+            Source = 'Documents\Codex'
+            Kind   = 'session'
+            Time   = $nonProject.Time
+            Detail = "$($nonProject.Count) 個非專案對話"
+        })
+    }
+
+    # 3) 以下訊號都需要 sqlite3.exe
+    if (-not $exe) {
+        $notes.Add('找不到 sqlite3.exe，SQLite 訊號已略過（安裝 sqlite3 後可再檢查）')
+    } else {
+        $dbList = @(
+            @{ File = (Get-AppDbFile $codexHome 'state_*.sqlite');          Label = 'state_*.sqlite';          Kind = 'session';    Sql = "select count(*), coalesce(max(updated_at),0) from threads where coalesce(source,'') not like '%subagent%' and coalesce(source,'') not like '%guardian%';"; Unit = 's';  Format = '累計 {0} 個會話（threads）' },
+            @{ File = (Get-AppDbFile $codexHome 'thread_history_*.sqlite'); Label = 'thread_history_*.sqlite'; Kind = 'session';    Sql = "select count(distinct i.thread_id), coalesce(max(i.created_at_ms),0) from thread_items i left join threads t on t.id = i.thread_id where coalesce(t.source,'') not like '%subagent%' and coalesce(t.source,'') not like '%guardian%';"; Unit = 'ms'; Format = '累計 {0} 個會話（逐字稿）' },
+            @{ File = (Get-AppDbFile $codexHome 'logs_*.sqlite');           Label = 'logs_*.sqlite';           Kind = 'background'; Sql = "select count(distinct thread_id), coalesce(max(ts),0) from logs where thread_id is not null and thread_id <> '';"; Unit = 's'; Format = '累計 {0} 個 thread（背景，不列入會話）' }
+        )
+        foreach ($d in $dbList) {
+            if (-not $d.File) { continue }
+            $raw = Invoke-SqliteScalar $d.File.FullName $d.Sql
+            if (-not $raw) { $notes.Add("$($d.Label) 查詢失敗（可能被鎖定）"); continue }
+            $parts = $raw -split '\|'
+            if ($parts.Count -lt 2) { continue }
+            $count = 0; [void][int]::TryParse($parts[0], [ref]$count)
+            $epoch = 0L; [void][long]::TryParse($parts[1], [ref]$epoch)
+            $time = ConvertFrom-UtcEpoch $epoch $d.Unit
+            if ($null -eq $time) { continue }
+            $signals.Add([pscustomobject]@{ Source = $d.Label; Kind = $d.Kind; Time = $time; Detail = ($d.Format -f $count) })
+        }
+
+        # 專案活動：只放進診斷，不算會話（開專案不代表有對話）
+        $stateDb = Get-AppDbFile $codexHome 'state_*.sqlite'
+        if ($stateDb) {
+            $raw = Invoke-SqliteScalar $stateDb.FullName 'select count(*), coalesce(max(updated_at_ms),0) from projects;'
+            if ($raw) {
+                $parts = $raw -split '\|'
+                if ($parts.Count -ge 2) {
+                    $count = 0; [void][int]::TryParse($parts[0], [ref]$count)
+                    $epochMs = 0L; [void][long]::TryParse($parts[1], [ref]$epochMs)
+                    $time = ConvertFrom-UtcEpoch $epochMs 'ms'
+                    if ($null -ne $time) {
+                        $signals.Add([pscustomobject]@{ Source = 'state_*.sqlite'; Kind = 'project'; Time = $time; Detail = "累計 $count 個專案" })
+                    }
+                }
+            }
+        }
+    }
+
+    $latest = $null
+    foreach ($s in $signals) {
+        if ($s.Kind -ne 'session') { continue }
+        if ($null -eq $latest -or $s.Time -gt $latest) { $latest = $s.Time }
+    }
+
+    return [pscustomobject]@{
+        Latest  = $latest
+        Signals = $signals.ToArray()
+        Notes   = $notes.ToArray()
+        Sqlite3 = $exe
+    }
+}
+
+# 依 本機活動產生「清單可能不完整」的提示；不需要提示時回傳空陣列
+function Format-CoverageNotice {
+    param($Activity, [DateTimeOffset]$LatestEvent = [DateTimeOffset]::MinValue, [int]$ToleranceSeconds = 60)
+
+    if ($null -eq $Activity -or $null -eq $Activity.Latest) { return @() }
+    $threshold = $LatestEvent.AddSeconds($ToleranceSeconds)
+    if ($Activity.Latest -le $threshold) { return @() }
+
+    $newer = @($Activity.Signals |
+        Where-Object { $_.Kind -eq 'session' -and $null -ne $_.Time -and $_.Time -gt $threshold } |
+        Sort-Object Time -Descending)
+    if ($newer.Count -eq 0) { return @() }
+
+    $eventText = if ($LatestEvent -gt [DateTimeOffset]::MinValue) { $LatestEvent.ToString('yyyy/MM/dd HH:mm:ss') } else { '無' }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("⚠ 本清單只涵蓋 rollout JSONL（最新事件：$eventText）；另有較新的會話紀錄，不會出現在上面：")
+    foreach ($s in ($newer | Select-Object -First 3)) {
+        $lines.Add(('  {0}：{1}，最新 {2}' -f $s.Source, $s.Detail, $s.Time.ToString('yyyy/MM/dd HH:mm:ss')))
+    }
+    if ($newer.Count -gt 3) { $lines.Add("  …另有 $($newer.Count - 3) 個來源") }
+    $lines.Add('  （清單只讀 rollout JSONL；未落地或沒有指令的會話都不會顯示）')
+    return $lines.ToArray()
+}
+
+function Show-CoverageNotice {
+    param($Lines)
+    if (-not $Lines -or $Lines.Count -eq 0) { return }
+    Write-Host ''
+    Write-Host (Color '93' $Lines[0])
+    foreach ($line in @($Lines | Select-Object -Skip 1)) { Write-Host (Color '90' $line) }
+}
+
 # 掃描一次：讀取各檔自 offset 之後的新行，回傳新事件（已依 call_id 配對輸出）
 function Read-TailBatch {
     param([hashtable]$Offsets, [hashtable]$Carries, [string]$Root = $SessionsDir)
-    $calls = [System.Collections.Generic.List[object]]::new()
+    $events = [System.Collections.Generic.List[object]]::new()
     $outs = @{}
     foreach ($f in (Get-RolloutFiles -Root $Root)) {
         $path = $f.FullName
@@ -821,16 +1349,45 @@ function Read-TailBatch {
         foreach ($line in $r.Lines) {
             try {
                 if (Test-HasCommand $line) {
-                    foreach ($ev in (Get-CommandEventsFromLine $line $path $cwd)) { $calls.Add($ev) }
+                    foreach ($ev in (Get-CommandEventsFromLine $line $path $cwd)) { $events.Add($ev) }
                 } elseif (Test-HasOutput $line) {
                     $rec = Get-ToolOutputsFromLine $line
                     if ($rec) { $outs[$rec.CallId] = $rec }
+                } elseif ($script:Options.ShowActivity -and (Test-HasActivity $line)) {
+                    foreach ($ev in (Get-ActivityEventsFromLine $line $path $cwd -IncludeMessages:$script:Options.ShowMessages)) { $events.Add($ev) }
                 }
             } catch { Write-Verbose "略過一行（解析失敗）：$($_.Exception.Message)" }
         }
     }
-    [void](Join-EventsWithOutputs $calls $outs)
-    return [pscustomobject]@{ Calls = $calls; Outputs = $outs }
+    [void](Join-EventsWithOutputs $events $outs)
+
+    # hook 事件：只讀新增行；transcript 存在的會話交給 rollout
+    $hookPath = Get-HookLogPath $Root
+    if (Test-Path -LiteralPath $hookPath) {
+        if (-not $Offsets.ContainsKey($hookPath)) { $Offsets[$hookPath] = 0L; $Carries[$hookPath] = '' }
+        $hookLength = (Get-Item -LiteralPath $hookPath).Length
+        if ([long]$hookLength -lt $Offsets[$hookPath]) { $Offsets[$hookPath] = 0L; $Carries[$hookPath] = '' }
+        if ([long]$hookLength -gt $Offsets[$hookPath]) {
+            $hr = try { Read-AppendedLines $hookPath $Offsets[$hookPath] $Carries[$hookPath] } catch { $null }
+            if ($hr) {
+                $Offsets[$hookPath] = $hr.Offset
+                $Carries[$hookPath] = $hr.Carry
+                foreach ($line in $hr.Lines) {
+                    try {
+                        $o = $line | ConvertFrom-Json
+                        $tp = [string]$o.transcript_path
+                        if ($tp -and (Test-Path -LiteralPath $tp)) { continue }
+                        $ev = ConvertFrom-HookEvent $o
+                        if (-not $ev) { continue }
+                        if (-not $script:Options.ShowActivity -and $ev.Kind -ne 'command') { continue }
+                        $events.Add($ev)
+                    } catch { Write-Verbose "略過 hook 行：$($_.Exception.Message)" }
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Events = $events; Outputs = $outs }
 }
 
 # 建立檔案變更監看器（FileSystemWatcher 即 ReadDirectoryChangesW）；失敗回傳 $null
@@ -876,6 +1433,19 @@ function Show-Diagnostics {
         }
         Write-Host ("  {0,2}. {1}  mtime={2}  size={3,8}  last={4}  {5}" -f $i, $f.Name, $f.LastWriteTime.ToString('MM-dd HH:mm'), $f.Length, $lastText, $stat)
     }
+
+    # rollout 以外的 本機訊號：確認「有沒有比 rollout 更新的會話」
+    Write-Host ''
+    Write-Host (Color '97' '本機訊號（rollout 以外，僅供比對）：')
+    $activity = Get-AppSessionActivity -SessionsRoot $Root
+    if ($activity.Signals.Count -eq 0) {
+        Write-Host (Color '90' '  （沒有可讀的 本機資料）')
+    } else {
+        foreach ($s in ($activity.Signals | Sort-Object Time -Descending)) {
+            Write-Host ('  {0,-24} {1}  {2}' -f $s.Source, $s.Time.ToString('yyyy-MM-dd HH:mm:ss'), $s.Detail)
+        }
+    }
+    foreach ($n in $activity.Notes) { Write-Host (Color '90' "  $n") }
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
@@ -888,15 +1458,22 @@ if ($Diag) {
 }
 
 $events = @(Get-RecentEvents $Limit)
+$latestEvent = Get-MaxRolloutEventTime
+if ($null -eq $latestEvent) { $latestEvent = Get-MaxEventTime $events }
+
+# 覆蓋率檢查：本機是否有本清單看不到的較新會話
+$coverageNotice = @(Format-CoverageNotice (Get-AppSessionActivity -SessionsRoot $SessionsDir) $latestEvent)
 
 if (-not $Tail) {
     # 由舊到新輸出：最新永遠在最下方，與 -Tail 一致
     foreach ($e in ($events | Sort-Object Time)) { Show-Event $e }
+    Show-CoverageNotice $coverageNotice
     return
 }
 
 # 監看模式：由舊到新排列（最新在最底部），後續新事件自然往下接續，不會亂序
 foreach ($e in ($events | Sort-Object Time)) { Show-Event $e }
+Show-CoverageNotice $coverageNotice
 
 # 時間下限：晚於此時間者才算「新事件」，可避免新出現的 rollout 檔重播舊內容
 $floor = Get-MaxEventTime $events
@@ -907,6 +1484,11 @@ $carries = @{}
 foreach ($f in (Get-RolloutFiles)) {
     $offsets[$f.FullName] = [long]$f.Length
     $carries[$f.FullName] = ''
+}
+$hookLog = Get-HookLogPath
+if (Test-Path -LiteralPath $hookLog) {
+    $offsets[$hookLog] = (Get-Item -LiteralPath $hookLog).Length
+    $carries[$hookLog] = ''
 }
 
 $pending = @{}
@@ -945,14 +1527,14 @@ try {
         }
 
         $batch = Read-TailBatch $offsets $carries
-        $newCalls = @(Select-NewEvents $batch.Calls $floor | Sort-Object Time)
-        $hasNew = ($newCalls.Count -gt 0) -or ($batch.Outputs.Count -gt 0)
+        $newEvents = @(Select-NewEvents $batch.Events $floor | Sort-Object Time)
+        $hasNew = ($newEvents.Count -gt 0) -or ($batch.Outputs.Count -gt 0)
 
         if ($hasNew) {
             $idleShown = $false
             if ($null -eq $watcher) { $pollSeconds = [Math]::Min(2, $pollCap) }
 
-            foreach ($e in $newCalls) {
+            foreach ($e in $newEvents) {
                 if (-not $e.Output -and $e.CallId) { $pending[$e.CallId] = $e }
                 Show-Event $e
             }
@@ -973,7 +1555,7 @@ try {
                 $pending.Remove($id)
             }
 
-            $floor = Get-MaxEventTime @($newCalls) $floor
+            $floor = Get-MaxEventTime @($newEvents) $floor
             foreach ($o in @($batch.Outputs.Values)) { if ($o.Time -and $o.Time -gt $floor) { $floor = $o.Time } }
         } elseif ($timedOut -and -not $idleShown) {
             Write-Host (Color '90' '… 閒置，等待變更（Ctrl+C 結束）')

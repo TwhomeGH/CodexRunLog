@@ -465,11 +465,11 @@ Describe '監看：增量讀取與 watcher' {
         $offsets = @{}; $carries = @{}
 
         $b1 = Read-TailBatch $offsets $carries -Root $script:mTmp
-        $b1.Calls.Count | Should -Be 1
-        $b1.Calls[0].Cmd | Should -Be 'CMD1'
+        $b1.Events.Count | Should -Be 1
+        $b1.Events[0].Cmd | Should -Be 'CMD1'
 
         $b2 = Read-TailBatch $offsets $carries -Root $script:mTmp
-        $b2.Calls.Count | Should -Be 0
+        $b2.Events.Count | Should -Be 0
 
         Add-Content -LiteralPath $script:mFile -Value $script:mOut1 -Encoding utf8
         $b3 = Read-TailBatch $offsets $carries -Root $script:mTmp
@@ -479,12 +479,12 @@ Describe '監看：增量讀取與 watcher' {
         $partial = '{"timestamp":"2026-10-30T13:02:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"CMD2\"})","call_id":"c2"}}'
         [System.IO.File]::AppendAllText($script:mFile, $partial)
         $b4 = Read-TailBatch $offsets $carries -Root $script:mTmp
-        $b4.Calls.Count | Should -Be 0   # 半行先保留
+        $b4.Events.Count | Should -Be 0   # 半行先保留
 
         [System.IO.File]::AppendAllText($script:mFile, "`n")
         $b5 = Read-TailBatch $offsets $carries -Root $script:mTmp
-        $b5.Calls.Count | Should -Be 1
-        $b5.Calls[0].Cmd | Should -Be 'CMD2'
+        $b5.Events.Count | Should -Be 1
+        $b5.Events[0].Cmd | Should -Be 'CMD2'
     }
 
     It 'Get-SessionWatcher 設定正確' {
@@ -507,6 +507,337 @@ Describe '監看：增量讀取與 watcher' {
             $res.TimedOut | Should -BeFalse
         } finally {
             $w.Dispose()
+        }
+    }
+}
+
+Describe 'App 端覆蓋率（Get-AppSessionActivity / Format-CoverageNotice）' {
+    BeforeAll {
+        $script:cTmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-app-' + [guid]::NewGuid().ToString('N'))
+        $script:cSessions = Join-Path $script:cTmp 'sessions'
+        New-Item -ItemType Directory -Force -Path $script:cSessions | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:cTmp 'session_index.jsonl') -Encoding utf8 -Value @(
+            '{"id":"a","updated_at":"2026-11-01T00:00:00Z"}',
+            '{"id":"b","updated_at":"2026-11-14T02:00:00Z"}'
+        )
+    }
+
+    AfterAll {
+        if (Test-Path -LiteralPath $script:cTmp) { Remove-Item -LiteralPath $script:cTmp -Recurse -Force }
+    }
+
+    It '從 session_index.jsonl 取得最新會話時間' {
+        $a = Get-AppSessionActivity -SessionsRoot $script:cSessions -NonProjectRoot ''
+        $a.Latest.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-11-14T02:00:00Z'
+        ($a.Signals | Where-Object Source -eq 'session_index.jsonl').Detail | Should -Match '2 筆'
+    }
+
+    It '找不到 App 端資料時 Latest 為空且不拋錯' {
+        $a = Get-AppSessionActivity -SessionsRoot (Join-Path $script:cTmp 'nope\sessions') -NonProjectRoot ''
+        $a.Latest | Should -BeNullOrEmpty
+    }
+
+    It 'App 端較新時產生提示（列出來源與時間）' {
+        $act = [pscustomobject]@{
+            Latest  = [DateTimeOffset]::Parse('2026-11-14T02:00:00Z')
+            Signals = @([pscustomobject]@{ Source = 'logs_*.sqlite'; Kind = 'session'; Time = [DateTimeOffset]::Parse('2026-11-14T02:00:00Z'); Detail = '累計 3 個 thread' })
+            Notes   = @()
+            Sqlite3 = 'sqlite3'
+        }
+        $lines = @(Format-CoverageNotice $act ([DateTimeOffset]::Parse('2026-11-11T00:21:57Z')))
+        $lines.Count | Should -BeGreaterThan 1
+        ($lines -join "`n") | Should -Match 'logs_\*\.sqlite'
+        ($lines -join "`n") | Should -Match '2026/11/14 02:00:00'
+    }
+
+    It 'App 端沒有較新活動時不提示' {
+        $act = [pscustomobject]@{
+            Latest  = [DateTimeOffset]::Parse('2026-11-10T00:00:00Z')
+            Signals = @([pscustomobject]@{ Source = 'logs_*.sqlite'; Kind = 'session'; Time = [DateTimeOffset]::Parse('2026-11-10T00:00:00Z'); Detail = '累計 1 個 thread' })
+            Notes   = @()
+            Sqlite3 = 'sqlite3'
+        }
+        @(Format-CoverageNotice $act ([DateTimeOffset]::Parse('2026-11-11T00:21:57Z'))) | Should -HaveCount 0
+    }
+
+    It '只有專案活動不算會話' {
+        $act = [pscustomobject]@{
+            Latest  = [DateTimeOffset]::Parse('2026-11-14T02:00:00Z')
+            Signals = @([pscustomobject]@{ Source = 'state_*.sqlite'; Kind = 'project'; Time = [DateTimeOffset]::Parse('2026-11-14T02:00:00Z'); Detail = '累計 17 個專案' })
+            Notes   = @()
+            Sqlite3 = 'sqlite3'
+        }
+        @(Format-CoverageNotice $act ([DateTimeOffset]::Parse('2026-11-11T00:21:57Z'))) | Should -HaveCount 0
+    }
+}
+
+Describe '非指令事件（檔案變更／MCP／Web 搜尋）' {
+    It '解析 FileChange 並統計 diff 行數' {
+        $line = '{"timestamp":"2026-10-10T13:00:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":{"C:\\proj\\a.ps1":{"type":"update","unified_diff":"@@ -1,2 +1,3 @@\n keep\n+added\n-removed"}}}}}'
+        $e = @(Get-ActivityEventsFromLine $line 's.jsonl' 'C:\proj')
+        $e | Should -HaveCount 1
+        $e[0].Kind | Should -Be 'file'
+        $e[0].Changes[0].Path | Should -Be 'C:\proj\a.ps1'
+        $e[0].Changes[0].Change | Should -Be 'update'
+        $e[0].Changes[0].Added | Should -Be 1
+        $e[0].Changes[0].Removed | Should -Be 1
+        $e[0].Time.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-10-10T13:00:00Z'
+    }
+
+    It '解析 McpToolCall 的 server／tool' {
+        $line = '{"timestamp":"2026-10-10T13:00:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","server":"codex_app","tool":"read_thread","arguments":{"threadId":"t1"},"status":"completed"}}}'
+        $e = @(Get-ActivityEventsFromLine $line 's.jsonl' '')
+        $e | Should -HaveCount 1
+        $e[0].Kind | Should -Be 'mcp'
+        $e[0].Server | Should -Be 'codex_app'
+        $e[0].Tool | Should -Be 'read_thread'
+    }
+
+    It '解析 web.search（查詢數與結果數）' {
+        $line = '{"timestamp":"2026-10-10T13:00:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Extension","kind":"web.search","action":{"queries":["a","b"]},"results":[{"x":1},{"x":2},{"x":3}]}}}'
+        $e = @(Get-ActivityEventsFromLine $line 's.jsonl' '')
+        $e | Should -HaveCount 1
+        $e[0].Kind | Should -Be 'search'
+        @($e[0].Queries).Count | Should -Be 2
+        $e[0].ResultCount | Should -Be 3
+    }
+
+    It 'CommandExecution 不重複產生事件' {
+        $line = '{"timestamp":"2026-10-10T13:00:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":"ls"}}}'
+        @(Get-ActivityEventsFromLine $line 's.jsonl' '') | Should -HaveCount 0
+    }
+
+    It 'Get-RecentEvents 納入非指令事件，-NoActivity 可關閉' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-act-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        try {
+            $f = Join-Path $tmp 'rollout-a.jsonl'
+            Set-Content -LiteralPath $f -Encoding utf8 -Value @(
+                '{"timestamp":"2026-10-10T13:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"echo hi\"})"}}',
+                '{"timestamp":"2026-10-10T13:00:01Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":{"C:\\p\\a.txt":{"type":"create","unified_diff":"+x"}}}}}'
+            )
+            $all = @(Get-RecentEvents -Need 10 -Root $tmp)
+            $all | Should -HaveCount 2
+            @($all | Where-Object { $_.Kind -eq 'file' }) | Should -HaveCount 1
+
+            $script:Options.ShowActivity = $false
+            try {
+                $only = @(Get-RecentEvents -Need 10 -Root $tmp)
+                $only | Should -HaveCount 1
+                $only[0].Cmd | Should -Be 'echo hi'
+            } finally {
+                $script:Options.ShowActivity = $true
+            }
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+
+    It '監看批次也包含非指令事件' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-acttail-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        try {
+            $f = Join-Path $tmp 'rollout-t.jsonl'
+            Set-Content -LiteralPath $f -Encoding utf8 -Value '{"timestamp":"2026-10-10T13:00:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","server":"s","tool":"t","status":"completed"}}}'
+            $offsets = @{}; $carries = @{}
+            $b = Read-TailBatch $offsets $carries -Root $tmp
+            $b.Events.Count | Should -Be 1
+            $b.Events[0].Kind | Should -Be 'mcp'
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+}
+
+Describe 'AgentMessage（-Messages）' {
+    BeforeAll {
+        $script:msgLine = '{"timestamp":"2026-10-10T13:00:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"Text","text":"第一行\n第二行"}]}}}'
+    }
+
+    It '預設不產生 Agent 事件' {
+        @(Get-ActivityEventsFromLine $script:msgLine 's.jsonl' '') | Should -HaveCount 0
+    }
+
+    It '-IncludeMessages 時解析文字與 phase' {
+        $e = @(Get-ActivityEventsFromLine $script:msgLine 's.jsonl' '' -IncludeMessages)
+        $e | Should -HaveCount 1
+        $e[0].Kind | Should -Be 'agent'
+        $e[0].Text | Should -Be "第一行`n第二行"
+        $e[0].Phase | Should -Be 'final_answer'
+    }
+
+    It 'Get-RecentEvents 由 ShowMessages 控制' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-msg-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        try {
+            Set-Content -LiteralPath (Join-Path $tmp 'rollout-m.jsonl') -Encoding utf8 -Value @(
+                '{"timestamp":"2026-10-10T13:00:00Z","type":"response_msg","payload":{"type":"message"}}',
+                $script:msgLine
+            )
+            @(Get-RecentEvents -Need 10 -Root $tmp) | Should -HaveCount 0
+
+            $script:Options.ShowMessages = $true
+            try {
+                $ev = @(Get-RecentEvents -Need 10 -Root $tmp)
+                $ev | Should -HaveCount 1
+                $ev[0].Kind | Should -Be 'agent'
+            } finally {
+                $script:Options.ShowMessages = $false
+            }
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+}
+
+Describe '背景 thread 不觸發覆蓋率提示' {
+    It 'Kind=background 不算會話' {
+        $act = [pscustomobject]@{
+            Latest  = [DateTimeOffset]::Parse('2026-11-14T02:00:00Z')
+            Signals = @([pscustomobject]@{ Source = 'logs_*.sqlite'; Kind = 'background'; Time = [DateTimeOffset]::Parse('2026-11-14T02:00:00Z'); Detail = '累計 34 個 thread（背景）' })
+            Notes   = @()
+            Sqlite3 = 'sqlite3'
+        }
+        @(Format-CoverageNotice $act ([DateTimeOffset]::Parse('2026-11-11T00:21:57Z'))) | Should -HaveCount 0
+    }
+}
+
+Describe 'rollout 時間地平線（Get-MaxRolloutEventTime）' {
+    It '取所有 rollout 檔的最新事件時間' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-hor-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        try {
+            Set-Content -LiteralPath (Join-Path $tmp 'rollout-a.jsonl') -Encoding utf8 -Value '{"timestamp":"2026-10-30T13:30:00Z","type":"session_meta","payload":{}}'
+            Set-Content -LiteralPath (Join-Path $tmp 'rollout-b.jsonl') -Encoding utf8 -Value '{"timestamp":"2026-10-31T01:00:00Z","type":"session_meta","payload":{}}'
+            $t = Get-MaxRolloutEventTime -Root $tmp
+            $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-10-31T01:00:00Z'
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+}
+
+Describe '非專案對話資料夾（Documents\Codex）' {
+    It '取日期／對話資料夾的最新時間與數量' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-npc-' + [guid]::NewGuid().ToString('N'))
+        $a = Join-Path $tmp '2026-11-13\new-chat'
+        $b = Join-Path $tmp '2026-10-12\chat-b'
+        New-Item -ItemType Directory -Force -Path (Join-Path $a 'work') | Out-Null
+        New-Item -ItemType Directory -Force -Path $b | Out-Null
+        try {
+            $f = Join-Path $a 'work\x.txt'
+            Set-Content -LiteralPath $f -Value 'hi'
+            (Get-Item -LiteralPath $f).LastWriteTime = [datetime]'2026-11-13 23:40:00'
+            (Get-Item -LiteralPath (Join-Path $a 'work')).LastWriteTime = [datetime]'2026-11-13 23:40:00'
+            (Get-Item -LiteralPath $a).LastWriteTime = [datetime]'2026-11-13 23:38:55'
+            (Get-Item -LiteralPath $b).LastWriteTime = [datetime]'2026-10-12 21:00:00'
+
+            $r = Get-NonProjectChatActivity -Root $tmp
+            $r.Count | Should -Be 2
+            $r.Time.ToString('yyyy-MM-dd HH:mm:ss') | Should -Be '2026-11-13 23:40:00'
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+
+    It '資料夾不存在時回傳空值' {
+        Get-NonProjectChatActivity -Root (Join-Path ([System.IO.Path]::GetTempPath()) 'crl-nope-none') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Hook 事件（runlog\events.jsonl）' {
+    It 'Bash → command 事件（含 tool_use_id 與輸出）' {
+        $o = '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"exec-1","cwd":"C:\\p","tool_input":{"command":"git status"},"tool_response":"clean\r\n","logged_at":"2026-11-14T11:32:14.944Z"}' | ConvertFrom-Json
+        $e = ConvertFrom-HookEvent $o
+        $e.Kind | Should -Be 'command'
+        $e.Cmd | Should -Be 'git status'
+        $e.Output | Should -Be "clean`r`n"
+        $e.CallId | Should -Be 'exec-1'
+        $e.Time.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-11-14T11:32:14Z'
+    }
+
+    It 'apply_patch → file 事件（逐檔統計）' {
+        $patch = "*** Begin Patch`n*** Update File: a.ps1`n@@`n+x`n-y`n*** Add File: b.txt`n+hello`n*** End Patch"
+        $o = [pscustomobject]@{
+            hook_event_name = 'PostToolUse'
+            tool_name = 'apply_patch'
+            cwd = 'C:\p'
+            tool_input = [pscustomobject]@{ command = $patch }
+            logged_at = '2026-11-14T11:32:14Z'
+        }
+        $e = ConvertFrom-HookEvent $o
+        $e.Kind | Should -Be 'file'
+        $e.Changes | Should -HaveCount 2
+        $e.Changes[0].Path | Should -Be 'a.ps1'
+        $e.Changes[0].Added | Should -Be 1
+        $e.Changes[0].Removed | Should -Be 1
+        $e.Changes[1].Change | Should -Be 'add'
+    }
+
+    It 'MCP → server／tool' {
+        $o = [pscustomobject]@{
+            hook_event_name = 'PostToolUse'
+            tool_name = 'mcp__codex_app__read_thread'
+            cwd = 'C:\p'
+            tool_input = [pscustomobject]@{ threadId = 't1' }
+            logged_at = '2026-11-14T11:32:14Z'
+        }
+        $e = ConvertFrom-HookEvent $o
+        $e.Kind | Should -Be 'mcp'
+        $e.Server | Should -Be 'codex_app'
+        $e.Tool | Should -Be 'read_thread'
+    }
+
+    It '有 transcript 的會話跳過（交給 rollout）' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-hookev-' + [guid]::NewGuid().ToString('N'))
+        $sessions = Join-Path $tmp 'sessions'
+        $runlog = Join-Path $tmp 'runlog'
+        New-Item -ItemType Directory -Force -Path $sessions, $runlog | Out-Null
+        try {
+            $rollout = Join-Path $sessions 'rollout-a.jsonl'
+            Set-Content -LiteralPath $rollout -Value '{"timestamp":"2026-11-14T10:00:00Z","type":"session_meta","payload":{}}'
+            $lines = @(
+                ('{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"C:\\p","tool_input":{"command":"covered"},"tool_response":"x","transcript_path":"' + ($rollout -replace '\\','\\\\') + '","logged_at":"2026-11-14T11:00:00Z"}'),
+                '{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"C:\\p","tool_input":{"command":"orphan"},"tool_response":"y","logged_at":"2026-11-14T11:01:00Z"}'
+            )
+            Set-Content -LiteralPath (Join-Path $runlog 'events.jsonl') -Encoding utf8 -Value $lines
+            $ev = @(Get-HookEvents -Path (Get-HookLogPath $sessions))
+            $ev | Should -HaveCount 1
+            $ev[0].Cmd | Should -Be 'orphan'
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+
+    It 'Get-RecentEvents 會納入沒有 rollout 的 hook 事件' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-hookmerge-' + [guid]::NewGuid().ToString('N'))
+        $sessions = Join-Path $tmp 'sessions'
+        $runlog = Join-Path $tmp 'runlog'
+        New-Item -ItemType Directory -Force -Path $sessions, $runlog | Out-Null
+        try {
+            Set-Content -LiteralPath (Join-Path $sessions 'rollout-a.jsonl') -Encoding utf8 -Value '{"timestamp":"2026-11-14T10:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"rollout-cmd\"})"}}'
+            Set-Content -LiteralPath (Join-Path $runlog 'events.jsonl') -Encoding utf8 -Value '{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"C:\\p","tool_input":{"command":"hook-cmd"},"tool_response":"ok","logged_at":"2026-11-14T11:00:00Z"}'
+            $ev = @(Get-RecentEvents -Need 10 -Root $sessions)
+            $ev | Should -HaveCount 2
+            ($ev | Where-Object { $_.Cmd -eq 'hook-cmd' }) | Should -Not -BeNullOrEmpty
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+
+    It '監看批次會讀取新增的 hook 行' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-hooktail-' + [guid]::NewGuid().ToString('N'))
+        $sessions = Join-Path $tmp 'sessions'
+        $runlog = Join-Path $tmp 'runlog'
+        New-Item -ItemType Directory -Force -Path $sessions, $runlog | Out-Null
+        try {
+            Set-Content -LiteralPath (Join-Path $runlog 'events.jsonl') -Encoding utf8 -Value '{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"C:\\p","tool_input":{"command":"tail-cmd"},"tool_response":"ok","logged_at":"2026-11-14T11:00:00Z"}'
+            $offsets = @{}; $carries = @{}
+            $b = Read-TailBatch $offsets $carries -Root $sessions
+            $b.Events.Count | Should -Be 1
+            $b.Events[0].Cmd | Should -Be 'tail-cmd'
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
         }
     }
 }
