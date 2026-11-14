@@ -34,7 +34,64 @@
 
 - **時間**：rollout 的 `timestamp` 是 **UTC（帶 `Z`）**，程式會轉成本地時間顯示。
 - **工作目錄**：新版 `exec` input 不帶 workdir，改讀每檔第一行 `session_meta` 的 `cwd`，在標頭顯示專案名。
-- **結果**：`payload.call_id` 可對應 `function_call_output` / `custom_tool_call_output`（目前尚未顯示，見「待辦」）。
+- **結果**：`payload.call_id` 可對應 `function_call_output` / `custom_tool_call_output`，顯示 exit code、耗時與輸出內容（`-NoOutput` 可關）。
+
+### 非指令事件（檔案變更／MCP／Web 搜尋）
+
+同一個 rollout 除 `response_item` 外還有 `event_msg` 的 `item_completed`；工具會把它變成時間軸上的事件，和指令一起排序：
+
+| `item.type` | 顯示 |
+| --- | --- |
+| `FileChange` | `[檔案變更]`：新增／修改／刪除＋diff 的 `+N -M` 行數 |
+| `McpToolCall` | `[MCP]`：server.tool 與參數（截斷至 160 字） |
+| `Extension`（`web.search`） | `[Web 搜尋]`：查詢數、結果數與第一個查詢 |
+| `AgentMessage` | `[Agent]`：Codex 的文字回覆（需 `-Messages`），標註 `commentary`／`final_answer` |
+
+`CommandExecution` 的 `item_completed` 不重複顯示（指令本來就從 `response_item` 來）。`-NoActivity` 可回到只看指令，`-Messages` 再加上文字回覆。
+
+`Reasoning` 的 `summary_text` 與 `raw_content` 在 rollout 裡實測全為空，因此不提供顯示。
+
+### 本機會話索引（rollout 以外）
+
+工具的資料來源是 rollout JSONL；`~/.codex` 另外還有會話索引，用來確認「有沒有比 rollout 更新的本機會話」。
+
+| 訊號 | 來源 | 說明 |
+| --- | --- | --- |
+| 會話索引 | `session_index.jsonl` | 不需 `sqlite3`；Guardian review 略過 |
+| 非專案對話 | `Documents\Codex\<日期>\<對話>` | 只有 `work`／`outputs`，沒有逐字稿 |
+| 會話清單 | `state_*.sqlite` 的 `threads` | 需 `sqlite3`；排除 subagent／guardian |
+| 逐字稿 | `thread_history_*.sqlite` 的 `thread_items` | 同上過濾 |
+| 背景活動 | `logs_*.sqlite` 的 `thread_id` | 只列在 `-Diag`；含 ambient／背景執行，**不算會話** |
+| 專案活動 | `state_*.sqlite` 的 `projects` | 只列在 `-Diag` |
+
+- 比對基準是**所有 rollout 檔的最新事件**（含 `session_meta`／`compaction` 等不顯示的行），不是清單最後一筆。
+- 只有會話類訊號（索引／`threads`／逐字稿／非專案對話）晚於基準 60 秒以上時才提示。
+- 例：本機最後使用為 11/12–11/13；rollout 最新事件 11/12 10:17，但 `Documents\Codex\2026-11-13\new-chat` 為 11/13 23:38 → 提示非專案對話不在清單內。
+
+> 非專案對話資料夾只存 `work/`、`outputs/`（對話產生的檔案），**不含逐字稿**；因此工具只能提示「有這個對話」，無法顯示內容。
+
+### Hooks（補齊沒有 rollout 的會話）
+
+rollout 只覆蓋部分會話（例如非專案對話可能不寫 rollout）。Codex 的 hooks 是官方穩定介面，可在工具呼叫後把**結構化事件**寫成本機 JSONL：
+
+| 項目 | 內容 |
+| --- | --- |
+| 收集器 | `hooks/codex-runlog-hook.py` → `~/.codex/runlog/events.jsonl` |
+| 安裝 | `pwsh -File .\hooks\Install-Hook.ps1` |
+| 信任 | 桌面版 **Settings > Hooks** 或 CLI `/hooks`（未信任不會執行） |
+| 移除 | `pwsh -File .\hooks\Install-Hook.ps1 -Uninstall` |
+
+涵蓋事件：`PostToolUse` 的 `Bash`（含 `exec_command`）、`apply_patch`、MCP、其他本地函式工具。`WebSearch` 等 hosted tool 不經本地 hook，仍由 rollout 提供。
+
+去重規則：若事件的 `transcript_path` 存在（有 rollout），交給 rollout（exit code／耗時較完整）；只有沒有 transcript 的會話才用 hook 事件。
+
+限制：
+
+- Windows 上 hook command 以空白切分，**路徑不能含空白**（安裝器會先檢查）。
+- `SessionEnd` 逾時上限 3 秒；hook 失敗不影響 Codex 執行。
+- 安裝後仍需在 Codex 審查並信任；hook 檔案變更會重新要求審查。
+
+找不到 `sqlite3.exe` 時只比對 `session_index.jsonl`，不影響主流程；`-Tail` 只在啟動時檢查一次。
 
 ---
 
@@ -61,14 +118,16 @@
 
 | 參數 | 型別 | 預設 | 說明 |
 | --- | --- | --- | --- |
-| `-Limit` | int | `50` | 取最新的 N 筆；輸出由舊到新（最新在最下方），與 `-Tail` 一致 |
+| `-Limit` | int | `50` | 取最新的 N 筆事件（指令、檔案變更、MCP 呼叫、Web 搜尋）；輸出由舊到新（最新在最下方），與 `-Tail` 一致 |
 | `-Tail` | switch | 關 | 印完起始內容後持續監看；檔案變更即時輸出（由舊到新，最新在最底部） |
 | `-Interval` | int | `60` | 監看的安全檢查間隔秒數（有變更時即時輸出；此為後援） |
 | `-PollOnly` | switch | 關 | 不用檔案變更通知，改固定輪詢（網路磁碟等環境） |
 | `-SessionsDir` | string | 自動解析 | rollout JSONL 根目錄；省略時依「設定檔 → `%USERPROFILE%\.codex\sessions` → 手動輸入」解析 |
 | `-OutputLines` | int | `8` | 每筆結果最多顯示頭尾各 N 行；`0` 表示全部 |
 | `-NoOutput` | switch | 關 | 不顯示執行結果 |
-| `-Diag` | switch | 關 | 診斷：列出各 rollout 檔的活動時間、mtime、大小、指令／結果數 |
+| `-NoActivity` | switch | 關 | 只顯示指令；略過檔案變更、MCP 呼叫與 Web 搜尋 |
+| `-Messages` | switch | 關 | 額外顯示 AgentMessage（Codex 的文字回覆） |
+| `-Diag` | switch | 關 | 診斷：列出各 rollout 檔的活動時間、mtime、大小、指令／結果數，以及 本機會話訊號 |
 
 > 本表為速查。參數與用法的**權威來源是程式內的註解說明**，執行 `Get-Help .\CodexRunLog.ps1 -Full`（另有 `-Examples`、`-Online`）即可取得；修改參數時請一併更新註解。
 
@@ -104,6 +163,17 @@ sessions = C:\Users\someone\.codex\sessions
   Get-Content notify.cpp -TotalCount 65
   Get-Content ntfy_test.cpp -TotalCount 65
   ↳ 讀取測試與原始檔內容以核對修改結果。
+
+──────────────────────────────────────────────────────────────────────────────
+2026/10/31 08:52:44  my_monitor_esp32
+  [檔案變更]
+  修改  C:\Users\me\proj\Test-Scripts.ps1  +3 -1
+  修改  C:\Users\me\proj\Docs\ChangeHistory.md  +1 -1
+
+──────────────────────────────────────────────────────────────────────────────
+2026/11/11 00:21:59  ProcessFix
+  [Web 搜尋]  2 個查詢，26 筆結果
+  site.learn.microsoft.com NotifyIcon ShowBalloonTip …
 ```
 
 每筆顯示：
@@ -112,6 +182,8 @@ sessions = C:\Users\someone\.codex\sessions
 2. **`[語言]  sandbox=…`**：判斷出的語言，以及沙箱權限（若有）
 3. **指令本體**：依語言上色，PowerShell 一行多句會展開縮排
 4. **`↳ 理由`**：Codex 的 `justification`（若有）
+
+非指令事件也會用同樣的標頭：檔案變更列出路徑與 `+N -M`，MCP 列出 `server.tool` 與參數，Web 搜尋列出查詢數／結果數。
 
 ### 上色圖例
 
@@ -164,13 +236,18 @@ rollout 的 `timestamp` 是 UTC。程式已用 `([DateTimeOffset][datetime]$ts).
 
 你的終端不支援 ANSI。請用 Windows Terminal，或 PowerShell 7（`$PSStyle.OutputRendering` 維持預設即可）。
 
+**清單看起來不是最新（最新事件停在好幾天前）。**
+
+先跑 `-Diag` 看「本機訊號」：若時間比 rollout 新，表示那些會話沒有落地成 `rollout-*.jsonl`（App／雲端會話），本工具不會顯示，輸出末尾也會有黃色提示。若連 本機訊號都沒有，再確認 `-SessionsDir` 是否指到正確的 `.codex\sessions`。
+
 ---
 
 ## 限制與待辦
 
-- **尚未顯示執行結果**：`tool_output`（成功/失敗、exit code、耗時）已可由 `call_id` 配對，尚未納入顯示。
+- **結果配對以 `call_id` 為準**：`write_stdin` 等續傳尚未彙整成同一筆（見 [`TODO.md`](../TODO.md)）。
+- **本機會話不在來源內**：工具只讀 rollout JSONL 與 hooks；非專案對話若沒安裝 hooks，只會被偵測到「存在且較新」，內容不會顯示。
 - **語言判斷為啟發式**：`node -e "…"` 這類「PowerShell 跑 JS」會標成 JavaScript，屬合理但非完美。
-- **僅涵蓋 shell 類工具**：`exec_command` / `shell_command` / `exec`；`apply_patch` 等編輯工具未顯示。
+- **僅涵蓋指令與少數事件**：`exec_command` / `shell_command` / `exec`，加上 `FileChange` / `McpToolCall` / `web.search`；`AgentMessage` 需 `-Messages`，`Reasoning` 在 rollout 裡沒有內容。
 
 > 完整的待辦（含跨平台 Linux/macOS 與 Web 頁面規劃）見專案根目錄 [`TODO.md`](../TODO.md)。
 

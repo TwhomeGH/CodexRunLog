@@ -1,5 +1,95 @@
 # Codex 運行日誌 — 改動說明
 
+## 2026.11.14 19:35 新增 Codex hooks 收集器（補齊無 rollout 會話）
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 有些會話沒有 rollout（例如非專案對話），清單看不到內容
+
+只能從 Documents\Codex 的資料夾時間推測，沒有逐字稿。
+
+### 根因 - 工具只讀 rollout-*.jsonl
+
+非專案對話不一定寫 rollout，也不在 threads 索引。
+
+### 修改 - hooks 收集器與讀取
+
+- 新增 hooks/Install-Hook.ps1：安裝／移除、備份 hooks.json、檢查空白路徑
+- CodexRunLog 讀取 hook 事件；transcript 存在時以 rollout 為準（避免重複、保留 exit code）
+- 新增測試與文件
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
+## 2026.11.14 19:21 新增 -Messages（AgentMessage 可選）與覆蓋率修正
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 想追 Codex 的文字回覆時，清單只有指令與動作
+
+AgentMessage 已在 rollout 裡，但工具沒解析；Reasoning 則是空的。
+
+### 根因 - item_completed 只處理 FileChange／McpToolCall／Extension
+
+AgentMessage 未納入；同時發現覆蓋率提示把背景 thread 當成會話，造成誤報。
+
+### 修改 - 新增 -Messages 顯示 AgentMessage（commentary／final_answer）
+
+- Reasoning 不提供（summary_text／raw_content 全空）
+- 覆蓋率修正：排除 subagent／guardian、logs 降為背景、比對基準改 rollout 檔最新事件
+- 新增 `Documents\Codex` 非專案對話訊號
+- 新增測試並同步更新文件
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
+## 2026.11.14 19:12 時間軸納入檔案變更／MCP／Web 搜尋事件
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 清單只看得到已執行的指令
+
+rollout 裡同時記錄了檔案變更、MCP 呼叫與 Web 搜尋（event_msg/item_completed），但工具完全忽略，看不出「除了跑指令還做了什麼」。
+
+### 根因 - 只解析 response_item 的 tool call
+
+舊流程只認 exec_command／shell_command，item_completed 一律跳過。
+
+### 修改 - 解析 item_completed 事件
+
+- 新增 -NoActivity；-Limit 改為事件數（指令與非指令共用時間軸）
+- 修正非指令事件的 UTC→本地時間換算（ConvertFrom-Json 會把 timestamp 轉成 DateTime）
+- 新增 Pester 測試並同步更新 README、Docs 與 TODO
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
+## 2026.11.14 03:42 新增本機會話覆蓋率提示
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 有較新的本機會話時，清單仍停在舊指令
+
+當 Codex App 的新會話沒有落地成 rollout 時，清單仍以舊指令（例如 11/11）為最新，卻沒有任何提示，容易誤判為排序錯誤或漏抓。
+
+### 根因 - 只讀 rollout-*.jsonl
+
+工具只讀 `sessions/**/rollout-*.jsonl`；Codex App 的會話不一定會寫成 rollout（App／雲端會話），因此清單的時間地平線停在最後一筆 rollout 指令。
+
+### 修改 - 啟動時偵測 rollout 以外的本機會話
+
+- 比對訊號：`session_index.jsonl`、`state_*.sqlite` 的 `threads`、`thread_history_*.sqlite`。
+- 若本機最新會話晚於清單最新事件，於輸出末尾印出黃色提示，說明清單只涵蓋 rollout。
+- `-Diag` 列出所有本機訊號；找不到 `sqlite3` 時只比對 `session_index.jsonl`，不影響主流程。
+- 新增 Pester 測試，同步更新 README、Docs 與 TODO。
+
+**相關文件**: [CodexRunLog.md](CodexRunLog.md)
+
+---
+
 ## 2026.10.30 22:38 監看改用 FileSystemWatcher（事件驅動＋安全輪詢）
 
 **類型**: 改進 · **檔案**: `CodexRunLog.ps1`

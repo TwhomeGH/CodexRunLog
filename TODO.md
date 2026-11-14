@@ -52,8 +52,9 @@
 ## 3. 資料完整性（CLI 與 Web 共用）
 
 - [ ] **顯示執行結果**：以 `call_id` 配對 `*_output`，呈現成功／失敗、exit code、耗時（Wall time）。
-- [ ] 涵蓋更多工具：`apply_patch`、`write_stdin`、`wait`、`update_plan`、`web_search_call` 等（目前只顯示 `exec_command` / `shell_command` / `exec`）。
+- [ ] **其餘工具呼叫**：`apply_patch`、`write_stdin`、`update_plan` 等 tool call 尚未逐一顯示（目前只顯示 exec_command／shell_command／exec，以及 `item_completed` 的 FileChange／McpToolCall／web.search）。
 - [ ] 彙整同一指令的「呼叫 → 結果」為一筆（含 `session_id` 的 stdin 續傳）。
+- [ ] **App 端會話（rollout 以外）**：hooks 已可補上未產生 rollout 的會話（Bash／apply_patch／MCP）；尚未涵蓋 hosted tool（WebSearch）與 hook 中沒有 transcript 的舊資料。`-Tail` 目前只在啟動時做一次覆蓋率檢查。
 - [ ] 處理長指令的顯示上限（避免單筆洗版）與明確標示截斷（若有）。
 - [ ] 支援 `compaction` / `session_meta` 標記，讓時間軸能標出「新 session / 已壓縮」事件。
 
