@@ -1,5 +1,21 @@
 # Codex 運行日誌 — 改動說明
 
+## 2026.11.17 02:40 時間軸顯示 Session 開始與結束
+
+**類型**: 改進 · **檔案**: `CodexRunLog.ps1`
+
+### 問題 - 清單只顯示工具事件；會話結束後看起來像漏抓，無法分辨是沒有新事件還是 session 已結束
+
+### 根因 - ConvertFrom-HookEvent 只處理 PostToolUse，SessionStart／SessionEnd 被丟棄；rollout 時間軸也沒有對應的開始／結束事件
+
+### 修改 - 解析 SessionStart／SessionEnd，顯示 [Session 開始]（含 source）與 [Session 結束]
+
+- 會話邊界即使有 transcript 也保留；-NoActivity 仍可關閉。
+
+**相關文件**: Docs/CodexRunLog.md
+
+---
+
 ## 2026.11.14 19:35 新增 Codex hooks 收集器（補齊無 rollout 會話）
 
 **類型**: 改進 · **檔案**: `CodexRunLog.ps1`

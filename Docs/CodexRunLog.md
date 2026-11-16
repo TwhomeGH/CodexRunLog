@@ -81,9 +81,11 @@ rollout 只覆蓋部分會話（例如非專案對話可能不寫 rollout）。C
 | 信任 | 桌面版 **Settings > Hooks** 或 CLI `/hooks`（未信任不會執行） |
 | 移除 | `pwsh -File .\hooks\Install-Hook.ps1 -Uninstall` |
 
-涵蓋事件：`PostToolUse` 的 `Bash`（含 `exec_command`）、`apply_patch`、MCP、其他本地函式工具。`WebSearch` 等 hosted tool 不經本地 hook，仍由 rollout 提供。
+涵蓋事件：`PostToolUse` 的 `Bash`（含 `exec_command`）、`apply_patch`、MCP、其他本地函式工具，以及 `SessionStart`／`SessionEnd` 兩個會話邊界。`WebSearch` 等 hosted tool 不經本地 hook，仍由 rollout 提供。
 
-去重規則：若事件的 `transcript_path` 存在（有 rollout），交給 rollout（exit code／耗時較完整）；只有沒有 transcript 的會話才用 hook 事件。
+會話邊界會顯示成 `[Session 開始]`（含 `source`，例如 `startup`）與 `[Session 結束]`，用來分辨「清單停住」是沒有新事件，還是會話已結束。
+
+去重規則：若事件的 `transcript_path` 存在（有 rollout），工具事件交給 rollout（exit code／耗時較完整）；**會話邊界例外**，因為 rollout 沒有開始／結束標記，仍由 hook 提供。`-NoActivity` 只保留指令，會一併隱藏會話邊界。
 
 限制：
 

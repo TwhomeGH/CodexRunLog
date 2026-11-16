@@ -15,7 +15,7 @@ Codex 在對話中常只顯示指令的摘要或截斷片段，長指令（例�
 - **含執行結果**：以 `call_id` 配對輸出，顯示 exit code、耗時與輸出內容（`-NoOutput` 可關）。
 - **不只指令**：同一份 rollout 的檔案變更、MCP 呼叫與 Web 搜尋也會顯示（`-NoActivity` 可關）。
 - **可選細節**：`-Messages` 顯示 Codex 的文字回覆（commentary／final_answer）；Reasoning 在 rollout 裡沒有內容。
-- **Hooks 補漏**：安裝 `hooks/Install-Hook.ps1` 後，沒有 rollout 的會話也能顯示（`~/.codex/runlog/events.jsonl`）。
+- **Hooks 補漏**：安裝 `hooks/Install-Hook.ps1` 後，沒有 rollout 的會話也能顯示（`~/.codex/runlog/events.jsonl`），並標出 `[Session 開始]`／`[Session 結束]`。
 - **跨機可攜**：sessions 目錄自動解析，找不到時提示輸入並記錄到 `CodexRunlog.ini`。
 - **覆蓋率提示**：本機會話索引（`threads`）或非專案對話（`Documents\Codex`）比 rollout 新時，會在清單後提示。
 
@@ -65,7 +65,7 @@ pwsh -File .\hooks\Install-Hook.ps1
 | `-SessionsDir` | 自動解析 | rollout JSONL 根目錄 |
 | `-OutputLines` | `8` | 每筆結果顯示的行數（頭尾各 N 行；`0` 為全部） |
 | `-NoOutput` | 關 | 不顯示執行結果 |
-| `-NoActivity` | 關 | 只顯示指令；略過檔案變更、MCP 呼叫與 Web 搜尋 |
+| `-NoActivity` | 關 | 只顯示指令；略過檔案變更、MCP 呼叫、Web 搜尋與會話邊界 |
 | `-Messages` | 關 | 額外顯示 AgentMessage（Codex 的文字回覆） |
 | `-Diag` | 關 | 診斷各 rollout 檔的活動時間與指令數 |
 
