@@ -1319,6 +1319,69 @@ function Get-AppSessionActivity {
     }
 }
 
+# ── 雲端環境（exec-server --remote）────────────────────────────
+# 雲端 session 的工具呼叫在遠端執行，不寫 rollout／hook；本機只能看到 exec-server 程序。
+
+function ConvertFrom-CloudEnvironmentId {
+    param([string]$Id)
+    if (-not $Id) { return '' }
+    if ($Id -notmatch '^ccarenv_b64_(.+)$') { return $Id }
+    try {
+        $b64 = $Matches[1]
+        $pad = $b64 + ('=' * ((4 - $b64.Length % 4) % 4))
+        return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pad))
+    } catch { return $Id }
+}
+
+# 從 codex.exe 的命令列判斷是不是雲端 exec-server；不是則回傳 $null
+function ConvertFrom-CloudExecCommandLine {
+    param([string]$CommandLine, $StartedAt = $null, [int]$ProcessId = 0)
+    if (-not $CommandLine) { return $null }
+    if ($CommandLine -notmatch '\bexec-server\b') { return $null }
+    $m = [regex]::Match($CommandLine, '--remote\s+(\S+)')
+    if (-not $m.Success) { return $null }
+    $envId = [regex]::Match($CommandLine, '--environment-id\s+(\S+)').Groups[1].Value
+    return [pscustomobject]@{
+        ProcessId = $ProcessId
+        Remote = $m.Groups[1].Value
+        EnvironmentId = (ConvertFrom-CloudEnvironmentId $envId)
+        RawEnvironmentId = $envId
+        StartedAt = $StartedAt
+    }
+}
+
+function Get-CloudExecSessions {
+    $out = [System.Collections.Generic.List[object]]::new()
+    try {
+        foreach ($p in (Get-CimInstance Win32_Process -Filter "Name='codex.exe'" -ErrorAction Stop)) {
+            $s = ConvertFrom-CloudExecCommandLine ([string]$p.CommandLine) ([datetime]$p.CreationDate) ([int]$p.ProcessId)
+            if ($s) { $out.Add($s) }
+        }
+    } catch { Write-Verbose "無法查詢雲端 exec-server：$($_.Exception.Message)" }
+    return $out.ToArray()
+}
+
+function Format-CloudSessionNotice {
+    param($Sessions)
+    if (-not $Sessions -or @($Sessions).Count -eq 0) { return @() }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($s in @($Sessions | Sort-Object StartedAt -Descending)) {
+        $started = if ($s.StartedAt) { ([datetime]$s.StartedAt).ToString('yyyy/MM/dd HH:mm:ss') } else { '未知' }
+        $envText = if ($s.EnvironmentId) { $s.EnvironmentId } else { '(未提供環境 ID)' }
+        $lines.Add("ℹ 雲端環境執行中：$envText，自 $started；這類對話不會寫入本機 rollout／hook。")
+    }
+    $lines.Add('  （若要在本機看到逐字稿與指令，請在 Codex 新開對話時選 Local 環境）')
+    return $lines.ToArray()
+}
+
+function Show-CloudNotice {
+    param($Lines)
+    if (-not $Lines -or $Lines.Count -eq 0) { return }
+    Write-Host ''
+    Write-Host (Color '96' $Lines[0])
+    foreach ($line in @($Lines | Select-Object -Skip 1)) { Write-Host (Color '90' $line) }
+}
+
 # 依 本機活動產生「清單可能不完整」的提示；不需要提示時回傳空陣列
 function Format-CoverageNotice {
     param($Activity, [DateTimeOffset]$LatestEvent = [DateTimeOffset]::MinValue, [int]$ToleranceSeconds = 60)
@@ -1468,6 +1531,18 @@ function Show-Diagnostics {
         }
     }
     foreach ($n in $activity.Notes) { Write-Host (Color '90' "  $n") }
+
+    Write-Host ''
+    Write-Host (Color '97' '雲端環境（exec-server --remote）：')
+    $cloud = @(Get-CloudExecSessions)
+    if ($cloud.Count -eq 0) {
+        Write-Host (Color '90' '  （沒有執行中的雲端 exec-server）')
+    } else {
+        foreach ($s in ($cloud | Sort-Object StartedAt -Descending)) {
+            $started = if ($s.StartedAt) { ([datetime]$s.StartedAt).ToString('yyyy-MM-dd HH:mm:ss') } else { '未知' }
+            Write-Host ('  pid={0}  env={1}  remote={2}  自 {3}' -f $s.ProcessId, $s.EnvironmentId, $s.Remote, $started)
+        }
+    }
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
@@ -1485,17 +1560,20 @@ if ($null -eq $latestEvent) { $latestEvent = Get-MaxEventTime $events }
 
 # 覆蓋率檢查：本機是否有本清單看不到的較新會話
 $coverageNotice = @(Format-CoverageNotice (Get-AppSessionActivity -SessionsRoot $SessionsDir) $latestEvent)
+$cloudNotice = @(Format-CloudSessionNotice (Get-CloudExecSessions))
 
 if (-not $Tail) {
     # 由舊到新輸出：最新永遠在最下方，與 -Tail 一致
     foreach ($e in ($events | Sort-Object Time)) { Show-Event $e }
     Show-CoverageNotice $coverageNotice
+    Show-CloudNotice $cloudNotice
     return
 }
 
 # 監看模式：由舊到新排列（最新在最底部），後續新事件自然往下接續，不會亂序
 foreach ($e in ($events | Sort-Object Time)) { Show-Event $e }
 Show-CoverageNotice $coverageNotice
+Show-CloudNotice $cloudNotice
 
 # 時間下限：晚於此時間者才算「新事件」，可避免新出現的 rollout 檔重播舊內容
 $floor = Get-MaxEventTime $events

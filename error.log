@@ -1,0 +1,10 @@
+[2026-11-16T19:06:53.935898100+00:00] startup: base_url=https://chatgpt.com/backend-api path_style=wham
+[2026-11-16T19:06:53.936859900+00:00] auth: mode=ChatGPT account_id=c57818cf-21fc-41ae-a87d-e7a181cc040e
+[2026-11-16T19:06:53.938149900+00:00] auth: set ChatGPT-Account-Id header: c57818cf-21fc-41ae-a87d-e7a181cc040e
+[2026-11-16T19:06:54.300816100+00:00] http.list_tasks: env=<all> limit=20 cursor_in=<none> cursor_out=<none> items=0
+[2026-11-16T19:07:52.470619700+00:00] startup: base_url=https://chatgpt.com/backend-api path_style=wham
+[2026-11-16T19:07:52.471116300+00:00] auth: mode=ChatGPT account_id=c57818cf-21fc-41ae-a87d-e7a181cc040e
+[2026-11-16T19:07:52.471627700+00:00] auth: set ChatGPT-Account-Id header: c57818cf-21fc-41ae-a87d-e7a181cc040e
+[2026-11-16T19:07:52.590005300+00:00] env: parsed HTTP GitHub origin => TwhomeGH/CodexRunLog
+[2026-11-16T19:07:52.831883300+00:00] env: status=400 Bad Request content-type=application/json
+[2026-11-16T19:07:53.106030800+00:00] env: status=200 OK content-type=application/json

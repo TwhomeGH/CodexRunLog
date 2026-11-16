@@ -900,3 +900,32 @@ Describe 'Hook 事件（runlog\events.jsonl）' {
         }
     }
 }
+
+Describe '雲端環境偵測（exec-server --remote）' {
+    It '解析遠端 URL 與 base64 環境 ID' {
+        $cmd = '"codex.exe" -c x exec-server --concurrent-requests 32 --remote https://codex-cloud-environments.chatgpt.com/api --environment-id ccarenv_b64_Y2NhcmVudl82YWJjZjUzMzk2ZTA4MTkxYWZmZWQ2NzQ3NTRiMTc4Yg'
+        $s = ConvertFrom-CloudExecCommandLine $cmd ([datetime]'2026-11-17 02:57:47') 28508
+        $s.Remote | Should -Be 'https://codex-cloud-environments.chatgpt.com/api'
+        $s.EnvironmentId | Should -Be 'ccarenv_6abcf53396e08191affed674754b178b'
+        $s.ProcessId | Should -Be 28508
+    }
+
+    It '不是 exec-server 或沒有 --remote 時不產生事件' {
+        ConvertFrom-CloudExecCommandLine '"codex.exe" app-server' | Should -BeNullOrEmpty
+        ConvertFrom-CloudExecCommandLine '"codex.exe" exec-server --listen stdio' | Should -BeNullOrEmpty
+        ConvertFrom-CloudExecCommandLine '' | Should -BeNullOrEmpty
+    }
+
+    It 'Format-CloudSessionNotice 產生提示與環境 ID' {
+        $s = [pscustomobject]@{
+            ProcessId = 1
+            EnvironmentId = 'ccarenv_x'
+            StartedAt = [datetime]'2026-11-17 02:57:47'
+            Remote = 'https://example.invalid'
+        }
+        $lines = @(Format-CloudSessionNotice @($s))
+        $lines.Count | Should -BeGreaterThan 1
+        $lines[0] | Should -Match '雲端環境'
+        $lines[0] | Should -Match 'ccarenv_x'
+    }
+}

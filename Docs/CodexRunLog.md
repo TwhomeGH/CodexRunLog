@@ -93,6 +93,27 @@ rollout 只覆蓋部分會話（例如非專案對話可能不寫 rollout）。C
 - `SessionEnd` 逾時上限 3 秒；hook 失敗不影響 Codex 執行。
 - 安裝後仍需在 Codex 審查並信任；hook 檔案變更會重新要求審查。
 
+### 雲端環境（exec-server --remote）
+
+Codex 可在遠端環境執行，例如：
+
+```text
+codex.exe … exec-server --concurrent-requests 32 \
+  --remote https://codex-cloud-environments.chatgpt.com/api \
+  --environment-id ccarenv_b64_…
+```
+
+這類會話的逐字稿與工具呼叫都在雲端，**不會寫入本機 rollout，也不經本機 hooks**，所以清單看不到任何內容。
+
+工具會掃描執行中的 `codex.exe` 命令列，發現雲端 exec-server 時在輸出末尾提示：
+
+```text
+ℹ 雲端環境執行中：ccarenv_6abcf53396e08191affed674754b178b，自 2026/11/17 02:57:47；
+  這類對話不會寫入本機 rollout／hook。
+```
+
+`-Diag` 會列出 PID、遠端 URL 與環境 ID。若要在本機留下逐字稿與指令，請在 Codex 新開對話時選擇 **Local** 環境。
+
 找不到 `sqlite3.exe` 時只比對 `session_index.jsonl`，不影響主流程；`-Tail` 只在啟動時檢查一次。
 
 ---
