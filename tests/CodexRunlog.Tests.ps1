@@ -788,6 +788,65 @@ Describe 'Hook 事件（runlog\events.jsonl）' {
         $e.Tool | Should -Be 'read_thread'
     }
 
+    It 'SessionStart → session 事件（source=startup）' {
+        $o = '{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:\\p","source":"startup","logged_at":"2026-11-16T17:36:47.784Z"}' | ConvertFrom-Json
+        $e = ConvertFrom-HookEvent $o
+        $e.Kind | Should -Be 'session'
+        $e.SessionEvent | Should -Be 'SessionStart'
+        $e.SessionSource | Should -Be 'startup'
+        $e.Time.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-11-16T17:36:47Z'
+    }
+
+    It 'SessionEnd → session 事件（保留 reason）' {
+        $o = [pscustomobject]@{ hook_event_name = 'SessionEnd'; session_id = 's1'; cwd = 'C:\p'; reason = 'other'; logged_at = '2026-11-16T18:38:06Z' }
+        $e = ConvertFrom-HookEvent $o
+        $e.Kind | Should -Be 'session'
+        $e.SessionEvent | Should -Be 'SessionEnd'
+        $e.SessionReason | Should -Be 'other'
+    }
+
+    It '會話邊界即使有 transcript 也保留' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-hooksession-' + [guid]::NewGuid().ToString('N'))
+        $sessions = Join-Path $tmp 'sessions'
+        $runlog = Join-Path $tmp 'runlog'
+        New-Item -ItemType Directory -Force -Path $sessions, $runlog | Out-Null
+        try {
+            $rollout = Join-Path $sessions 'rollout-a.jsonl'
+            Set-Content -LiteralPath $rollout -Value '{"timestamp":"2026-11-14T10:00:00Z","type":"session_meta","payload":{}}'
+            $lines = @(
+                ('{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:\\p","source":"startup","transcript_path":"' + ($rollout -replace '\\','\\\\') + '","logged_at":"2026-11-14T11:00:00Z"}'),
+                ('{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"C:\\p","tool_input":{"command":"covered"},"tool_response":"x","transcript_path":"' + ($rollout -replace '\\','\\\\') + '","logged_at":"2026-11-14T11:01:00Z"}')
+            )
+            Set-Content -LiteralPath (Join-Path $runlog 'events.jsonl') -Encoding utf8 -Value $lines
+            $ev = @(Get-HookEvents -Path (Get-HookLogPath $sessions))
+            $ev | Should -HaveCount 1
+            $ev[0].Kind | Should -Be 'session'
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+
+    It 'SessionStart 會進入時間軸，-NoActivity 可關閉' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-hooksession2-' + [guid]::NewGuid().ToString('N'))
+        $sessions = Join-Path $tmp 'sessions'
+        $runlog = Join-Path $tmp 'runlog'
+        New-Item -ItemType Directory -Force -Path $sessions, $runlog | Out-Null
+        try {
+            Set-Content -LiteralPath (Join-Path $runlog 'events.jsonl') -Encoding utf8 -Value '{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:\\p","source":"startup","logged_at":"2026-11-14T11:00:00Z"}'
+            $all = @(Get-RecentEvents -Need 10 -Root $sessions)
+            $all | Should -HaveCount 1
+            $all[0].Kind | Should -Be 'session'
+            $script:Options.ShowActivity = $false
+            try {
+                @(Get-RecentEvents -Need 10 -Root $sessions) | Should -HaveCount 0
+            } finally {
+                $script:Options.ShowActivity = $true
+            }
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+        }
+    }
+
     It '有 transcript 的會話跳過（交給 rollout）' {
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('crl-hookev-' + [guid]::NewGuid().ToString('N'))
         $sessions = Join-Path $tmp 'sessions'

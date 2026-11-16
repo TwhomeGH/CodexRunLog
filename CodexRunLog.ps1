@@ -785,7 +785,7 @@ function ConvertFrom-PatchText {
 # 單一 hook 事件 → 時間軸事件；不支援的事件回傳 $null
 function ConvertFrom-HookEvent {
     param($Item)
-    if ([string]$Item.hook_event_name -ne 'PostToolUse') { return $null }
+    $name = [string]$Item.hook_event_name
 
     $time = $null
     if ($Item.logged_at) {
@@ -799,6 +799,18 @@ function ConvertFrom-HookEvent {
         } catch { Write-Verbose "logged_at 解析失敗：$($_.Exception.Message)" }
     }
     if ($null -eq $time) { return $null }
+
+    # 會話邊界：即使有 rollout 也保留（rollout 時間軸沒有開始／結束標記）
+    if ($name -eq 'SessionStart' -or $name -eq 'SessionEnd') {
+        return [pscustomobject]@{
+            Kind = 'session'; Time = $time; Workdir = [string]$Item.cwd
+            SessionEvent = $name; SessionId = [string]$Item.session_id
+            SessionSource = [string]$Item.source; SessionReason = [string]$Item.reason
+            Source = 'hook'
+        }
+    }
+
+    if ($name -ne 'PostToolUse') { return $null }
 
     $tool = [string]$Item.tool_name
     $cwd = [string]$Item.cwd
@@ -846,8 +858,9 @@ function Get-HookEvents {
         foreach ($line in (Read-SharedLines $Path)) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             try { $o = $line | ConvertFrom-Json } catch { continue }
+            $isSession = ([string]$o.hook_event_name -eq 'SessionStart' -or [string]$o.hook_event_name -eq 'SessionEnd')
             $tp = [string]$o.transcript_path
-            if ($tp -and (Test-Path -LiteralPath $tp)) { continue }
+            if (-not $isSession -and $tp -and (Test-Path -LiteralPath $tp)) { continue }
             $ev = ConvertFrom-HookEvent $o
             if ($ev) { $out.Add($ev) }
         }
@@ -1007,6 +1020,15 @@ function Show-ActivityEvent {
             if ($e.Phase) { $label += "  $($e.Phase)" }
             Write-Host ('  ' + (Color '36' $label))
             Write-TextBlock $e.Text '97'
+        }
+        'session' {
+            if ($e.SessionEvent -eq 'SessionStart') {
+                $detail = ''
+                if ($e.SessionSource) { $detail = "  $($e.SessionSource)" }
+                Write-Host ('  ' + (Color '36' '[Session 開始]') + (Color '90' $detail))
+            } else {
+                Write-Host ('  ' + (Color '90' '[Session 結束]'))
+            }
         }
         default {
             Write-Host ('  ' + (Color '36' "[$($e.ExtensionKind)]"))
